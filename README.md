@@ -87,6 +87,19 @@ This installs the Python packages and downloads the models. After this, **no int
 5. Use the three tabs: **Bullet points** (each with a 📍 Source popover; tick off action items),
    **Ask the transcript** (chat, with suggested questions), and **Transcript** (search and downloads).
 
+### Share with people on the same network (Windows)
+```powershell
+powershell -ExecutionPolicy Bypass -File run_lan.ps1
+```
+The models still run only on this PC; others open the printed `http://<this-PC's-IP>:8501` link.
+- **Access code:** a random 6-digit code is printed at each start (or set `$env:SNAP_ACCESS_CODE` first).
+- **One at a time:** while a meeting is processing, others see "busy, try again".
+- **Privacy receipt:** browsers on the local network are listed as viewers; anything else still counts
+  as an external connection.
+- **Network:** allow Python through Windows Firewall on **private** networks. Guest Wi-Fi often blocks
+  device-to-device traffic; use the office network or a phone hotspot instead.
+- Airplane mode turns off the local network too, so use `run_demo.ps1` for the fully offline demo.
+
 ### Command line
 ```bash
 python pipeline.py sample/sample_notes.md --ask "Who builds the progress bar?" --ask "What is the budget?"

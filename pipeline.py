@@ -446,12 +446,26 @@ def _is_loopback(ip: str) -> bool:
     return ip.startswith("127.") or ip in ("::1", "localhost") or ip.startswith("::ffff:127.")
 
 
-def external_connections() -> dict:
+def _is_private(ip: str) -> bool:
+    """True for addresses on the local network (192.168.x.x, 10.x.x.x, fe80::, ...)."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip.removeprefix("::ffff:"))  # IPv4 written as IPv6
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_link_local
+
+
+def external_connections(serving_port: Optional[int] = None) -> dict:
     """Non-loopback network connections held by this app and by Ollama.
-    An empty list is the 'nothing left this laptop' proof."""
+    An empty "external" list is the 'nothing left this laptop' proof.
+
+    When the app is shared on the local network (run_lan.ps1), other people's browsers
+    connect in to `serving_port`. Those are listed under "viewers", not as leaks, but only
+    when they come from a private (local network) address; anything else stays external."""
     import psutil
 
-    report: dict = {"checked": [], "external": [], "notes": []}
+    report: dict = {"checked": [], "external": [], "viewers": [], "notes": []}
     procs = [psutil.Process()]
     for p in psutil.process_iter(["name"]):
         if "ollama" in (p.info.get("name") or "").lower():
@@ -466,7 +480,10 @@ def external_connections() -> dict:
         report["checked"].append(f"{name} (pid {p.pid})")
         for c in conns:
             if c.raddr and not _is_loopback(c.raddr.ip):
-                report["external"].append(f"{name}: {c.raddr.ip}:{c.raddr.port} ({c.status})")
+                inbound_viewer = (serving_port is not None and c.laddr and c.laddr.port == serving_port
+                                  and _is_private(c.raddr.ip))
+                bucket = "viewers" if inbound_viewer else "external"
+                report[bucket].append(f"{name}: {c.raddr.ip}:{c.raddr.port} ({c.status})")
     return report
 
 

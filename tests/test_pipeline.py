@@ -363,7 +363,34 @@ def test_answer_not_found_or_uncited_becomes_not_in_transcript():
 # ----------------------------------------------------------------- privacy
 def test_privacy_receipt_shape():
     r = P.external_connections()
-    assert set(r) == {"checked", "external", "notes"} and r["checked"]
+    assert set(r) == {"checked", "external", "viewers", "notes"} and r["checked"]
+
+
+def test_lan_viewers_are_not_counted_as_external():
+    conn = lambda lport, rip: types.SimpleNamespace(  # noqa: E731
+        laddr=types.SimpleNamespace(ip="0.0.0.0", port=lport),
+        raddr=types.SimpleNamespace(ip=rip, port=50000), status="ESTABLISHED")
+
+    class FakeProc:
+        pid, info = 1, {"name": "python.exe"}
+
+        def name(self):
+            return "python.exe"
+
+        def net_connections(self, kind):
+            return [conn(8501, "192.168.1.20"),      # a colleague's browser on the Wi-Fi
+                    conn(8501, "::ffff:10.0.0.7"),   # same, IPv4 written as IPv6
+                    conn(8501, "8.8.8.8"),           # a public address reaching the app: flag it
+                    conn(52000, "192.168.1.1")]      # an outbound local connection: flag it
+
+    fake_psutil = types.SimpleNamespace(Process=FakeProc, process_iter=lambda attrs: [],
+                                        AccessDenied=Exception, NoSuchProcess=Exception)
+    with mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
+        r = P.external_connections(serving_port=8501)
+        local_only = P.external_connections()
+    assert len(r["viewers"]) == 2 and len(r["external"]) == 2
+    assert "8.8.8.8" in " ".join(r["external"]) and "192.168.1.1" in " ".join(r["external"])
+    assert len(local_only["external"]) == 4 and not local_only["viewers"]  # local-only mode: all flagged
 
 
 def test_nothing_written_to_disk_by_readers_and_rag(tmp_path=None):

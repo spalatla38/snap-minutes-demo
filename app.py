@@ -11,7 +11,10 @@ an animated panel about five times a second with % done, time remaining and elap
 it only reports progress to the Tracker, which the page reads."""
 from __future__ import annotations
 
+import hmac
 import io
+import os
+import socket
 import threading
 import time
 from pathlib import Path
@@ -51,6 +54,38 @@ for key, default in {"start": 0, "media": None, "media_name": None, "segments": 
     ss.setdefault(key, default)
 if ss.rates is None:
     ss.rates = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_RATES.items()}
+
+# ------------------------------------------------------------------ sharing on the local network
+# run_lan.ps1 sets SNAP_LAN=1 and SNAP_ACCESS_CODE, and serves the app to the local network.
+# The default (run_demo.ps1) listens on 127.0.0.1 only and needs no code.
+LAN_MODE = os.environ.get("SNAP_LAN") == "1"
+ACCESS_CODE = os.environ.get("SNAP_ACCESS_CODE", "")
+SERVER_PORT = int(st.get_option("server.port") or 8501)
+
+if ACCESS_CODE and not ss.get("authed"):
+    st.markdown(ui.hero(), unsafe_allow_html=True)
+    st.info(f"SNAP Assist is shared from **{socket.gethostname()}** on this network. "
+            "Ask the host for the access code.")
+    with st.form("gate"):
+        code = st.text_input("Access code", type="password")
+        if st.form_submit_button("Enter", type="primary"):
+            if hmac.compare_digest(code.strip().encode(), ACCESS_CODE.encode()):
+                ss.authed = True
+                st.rerun()
+            time.sleep(1.5)  # slows down guessing
+            st.error("That code isn't right.")
+    st.stop()
+
+
+@st.cache_resource
+def gpu_lock() -> threading.Lock:
+    """One lock for the whole server (shared by every browser session): only one meeting is
+    processed at a time, so two people never compete for the GPU and its memory."""
+    return threading.Lock()
+
+
+def privacy_receipt() -> dict:
+    return P.external_connections(serving_port=SERVER_PORT if LAN_MODE else None)
 
 
 def reset(media=None, media_name=None):
@@ -190,12 +225,21 @@ def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
         Stage("notes", "Writing bullet points", 15.0),
     ])
     out: dict = {}
+    lock = gpu_lock()
+    if not lock.acquire(blocking=False):
+        st.warning("⏳ Someone else is processing a meeting on this PC right now. "
+                   "Please try again in a minute.")
+        return
 
     def target():
         try:
             out["result"] = process(job, tracker, ss_rates, llm, whisper_size)
         except Exception as e:  # noqa: BLE001  (shown to the user below)
             out["error"] = e
+        finally:
+            # Released by the worker, not the page: if the person closes the tab mid-run,
+            # the work still finishes before the next person can start.
+            lock.release()
 
     ss_rates = ss.rates  # the worker gets a plain dict, never session_state itself
     panel = st.empty()
@@ -220,7 +264,7 @@ def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
         st.toast("GPU transcription wasn't available, so the CPU was used. See README: GPU setup.")
     time.sleep(0.9)  # let the finished state (green check, 100%) show for a moment
     ss.update(segments=res["segments"], index=res["index"], notes=res["notes"], qa=[], start=0,
-              source=res["source"], timings=res["timings"], receipt=P.external_connections(),
+              source=res["source"], timings=res["timings"], receipt=privacy_receipt(),
               pending_q=None, run_id=ss.run_id + 1)
     st.rerun()
 
@@ -250,22 +294,34 @@ with st.sidebar:
 
     st.divider()
     st.header("🔒 Privacy")
-    st.caption("All processing happens on this computer. Nothing is saved after you close the app.")
-    if st.button("Check: is this laptop offline?"):
-        if P.internet_reachable():
-            st.warning("Internet is reachable. Turn on airplane mode for the demo.")
-        else:
-            st.success("No internet connection. Everything runs on this device.")
+    if LAN_MODE:
+        st.caption(f"All processing happens on **{socket.gethostname()}**, the PC hosting this app on "
+                   "your local network. Files you upload go only to that PC and are not saved.")
+        if gpu_lock().locked():
+            st.warning("⏳ A meeting is being processed right now.")
+    else:
+        st.caption("All processing happens on this computer. Nothing is saved after you close the app.")
+        # Airplane mode would also cut the local network, so this check is for local-only mode.
+        if st.button("Check: is this laptop offline?"):
+            if P.internet_reachable():
+                st.warning("Internet is reachable. Turn on airplane mode for the demo.")
+            else:
+                st.success("No internet connection. Everything runs on this device.")
     if ss.receipt:
         r = ss.receipt
         n = len(r["external"])
         (st.success if n == 0 else st.error)(f"Privacy receipt: {n} external connections")
+        if r.get("viewers"):
+            st.caption(f"Plus {len(r['viewers'])} browser connection(s) from the local network "
+                       "(people using this app). These stay inside your network.")
         st.caption("Checked: " + ", ".join(r["checked"]))
         for line in r["external"] + r["notes"]:
             st.caption(line)
 
 # ------------------------------------------------------------------ input
 st.markdown(ui.hero(), unsafe_allow_html=True)
+if LAN_MODE:
+    st.caption(f"🖧 Shared from **{socket.gethostname()}** on your local network · one meeting is processed at a time")
 
 tab_file, tab_paste = st.tabs(["📁 Upload a file", "📋 Paste text"])
 pasted = None
@@ -388,7 +444,7 @@ if ss.segments:
                 try:
                     res = rag.answer(question, ss.index, segments, model=llm)
                     ss.qa.append({"q": question, **res})
-                    ss.receipt = P.external_connections()
+                    ss.receipt = privacy_receipt()
                     st.rerun()
                 except Exception as e:  # noqa: BLE001
                     thinking.error(f"Something went wrong: {e}")
