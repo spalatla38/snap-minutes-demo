@@ -1,0 +1,8 @@
+# Keep the demo fully local.
+[browser]
+gatherUsageStats = false     # turn off Streamlit's anonymous usage statistics
+
+[server]
+address = "127.0.0.1"        # only reachable from this laptop, not the network
+headless = true
+maxUploadSize = 500          # MB
