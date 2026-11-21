@@ -11,3 +11,8 @@ requests>=2.31
 psutil>=5.9
 numpy>=1.26
 pdfplumber>=0.11
+# Speaker names from video (speakers.py): voices with sherpa-onnx (Apache 2.0), names on
+# screen with RapidOCR (Apache 2.0; brings opencv-python, Shapely, pyclipper). The two
+# speaker models are downloaded into models/ by the setup script.
+sherpa-onnx==2.0.2
+rapidocr-onnxruntime==1.4.4

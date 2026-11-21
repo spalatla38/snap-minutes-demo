@@ -32,5 +32,22 @@ Write-Host "Downloading Whisper speech-to-text models..."
 $env:HF_HUB_OFFLINE = "0"
 .\.venv\Scripts\python.exe -c "from faster_whisper import WhisperModel; [WhisperModel(m, device='cpu', compute_type='int8') for m in ('base', 'small')]; print('Whisper models ready')"
 
+Write-Host "Downloading speaker models (about 33 MB) for naming speakers in videos..."
+# pyannote segmentation 3.0 (MIT) and 3D-Speaker ERes2Net English (Apache 2.0), as packaged
+# by the sherpa-onnx project. If this fails, videos are still processed, just without names.
+$rel = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
+New-Item -ItemType Directory -Force models | Out-Null
+try {
+  if (-not (Test-Path "models\sherpa-onnx-pyannote-segmentation-3-0\model.onnx")) {
+    Invoke-WebRequest "$rel/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2" -OutFile "models\seg.tar.bz2"
+    tar -xjf "models\seg.tar.bz2" -C models
+    Remove-Item "models\seg.tar.bz2"
+  }
+  if (-not (Test-Path "models\3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx")) {
+    Invoke-WebRequest "$rel/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx" -OutFile "models\3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx"
+  }
+  Write-Host "Speaker models ready"
+} catch { Write-Host "Speaker models not downloaded ($($_.Exception.Message)); videos will be processed without speaker names." }
+
 Write-Host ""
 Write-Host "Setup complete. You can now go offline and start the demo with: .\run_demo.ps1"
