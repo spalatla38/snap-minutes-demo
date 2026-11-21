@@ -13,9 +13,10 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-echo "Downloading language models (about 3.5 GB)..."
-ollama pull llama3.2:3b
-ollama pull llama3.2:1b
+echo "Downloading open-source models (about 4 GB)..."
+ollama pull qwen3:4b-instruct   # default language model (Apache 2.0)
+ollama pull qwen3:1.7b          # low-memory option (Apache 2.0)
+ollama pull all-minilm          # embeddings for Q&A (Apache 2.0)
 
 echo "Downloading Whisper speech-to-text models..."
 HF_HUB_OFFLINE=0 python -c "from faster_whisper import WhisperModel; [WhisperModel(m, device='cpu', compute_type='int8') for m in ('base', 'small')]; print('Whisper models ready')"

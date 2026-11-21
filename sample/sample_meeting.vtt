@@ -1,0 +1,113 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:02.000
+Okay, let's get started.
+
+2
+00:00:02.300 --> 00:00:05.000
+This is our weekly SNAP Assist sync.
+
+3
+00:00:05.300 --> 00:00:11.100
+The main topic today is the pilot with Riverbend Legal, which starts on December fifteenth.
+
+4
+00:00:11.400 --> 00:00:16.400
+On the data side, the ingestion pipeline now handles scanned PDFs with OCR.
+
+5
+00:00:16.700 --> 00:00:24.000
+The open problem is that some contract scans are tilted, and accuracy drops to about eighty percent on those.
+
+6
+00:00:24.300 --> 00:00:27.300
+That matters, because Riverbend mostly sends scanned contracts.
+
+7
+00:00:27.600 --> 00:00:31.100
+Aarya, can you add automatic page straightening before OCR?
+
+8
+00:00:31.400 --> 00:00:33.400
+Yes.
+
+9
+00:00:33.700 --> 00:00:36.400
+I'll have it done by December fifth.
+
+10
+00:00:36.700 --> 00:00:43.600
+On the model side, we tested Qwen3 4B against the 1.7B model on our twenty sample contracts.
+
+11
+00:00:43.900 --> 00:00:48.900
+The 4B model got the right owner and deadline in eighteen of twenty.
+
+12
+00:00:49.200 --> 00:00:51.500
+The 1.7B model only got thirteen.
+
+13
+00:00:51.800 --> 00:00:54.900
+So I recommend we ship the 4B model.
+
+14
+00:00:55.200 --> 00:00:57.200
+Agreed.
+
+15
+00:00:57.500 --> 00:01:01.400
+Decision: we go with the 4B model for the pilot.
+
+16
+00:01:01.700 --> 00:01:07.000
+One concern: the 4B model takes about twenty seconds per document on older laptops.
+
+17
+00:01:07.300 --> 00:01:13.100
+I'd like to add a progress bar and let people keep working while it runs.
+
+18
+00:01:13.400 --> 00:01:15.400
+Good idea.
+
+19
+00:01:15.700 --> 00:01:20.700
+Sai, please build the progress bar and background processing before the pilot starts.
+
+20
+00:01:21.000 --> 00:01:23.000
+Will do.
+
+21
+00:01:23.300 --> 00:01:27.200
+I'll target December tenth so we have time to test.
+
+22
+00:01:27.500 --> 00:01:34.400
+I'll also write a short test set of tricky contracts so we can catch mistakes before Riverbend does.
+
+23
+00:01:34.700 --> 00:01:37.000
+I can finish that this Friday.
+
+24
+00:01:37.300 --> 00:01:39.300
+Great.
+
+25
+00:01:39.600 --> 00:01:44.600
+Last item: Riverbend asked for written proof that no data leaves the device.
+
+26
+00:01:44.900 --> 00:01:52.600
+I'll prepare a one-page privacy summary with our network test results and send it to their IT lead next Monday.
+
+27
+00:01:52.900 --> 00:02:05.600
+So to recap: Aarya does page straightening by December fifth, Sai does the progress bar by December tenth, Niharika writes the test set by Friday, and I send the privacy summary on Monday.
+
+28
+00:02:05.900 --> 00:02:07.900
+Thanks, everyone.

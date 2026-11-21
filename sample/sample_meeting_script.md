@@ -17,11 +17,11 @@ Save as `.mp4` or `.mov`.
 
 **Aarya:** Yes. I'll have it done by December fifth.
 
-**Niharika (AI/ML Engineer):** On the model side, we tested Llama 3.2 3B against the 1B model on our twenty sample contracts. The 3B model got the right owner and deadline in eighteen of twenty. The 1B model only got thirteen. So I recommend we ship the 3B model.
+**Niharika (AI/ML Engineer):** On the model side, we tested Qwen3 4B against the 1.7B model on our twenty sample contracts. The 4B model got the right owner and deadline in eighteen of twenty. The 1.7B model only got thirteen. So I recommend we ship the 4B model.
 
-**Precious:** Agreed. Decision: we go with the 3B model for the pilot.
+**Precious:** Agreed. Decision: we go with the 4B model for the pilot.
 
-**Sai (Application Developer):** One concern: the 3B model takes about twenty seconds per document on older laptops. I'd like to add a progress bar and let people keep working while it runs.
+**Sai (Application Developer):** One concern: the 4B model takes about twenty seconds per document on older laptops. I'd like to add a progress bar and let people keep working while it runs.
 
 **Precious:** Good idea. Sai, please build the progress bar and background processing before the pilot starts.
 
@@ -40,9 +40,9 @@ Save as `.mp4` or `.mov`.
 **Key points**
 - The Riverbend Legal pilot starts on December 15.
 - OCR accuracy drops to about 80% on tilted contract scans.
-- Llama 3.2 3B found the right owner and deadline in 18 of 20 sample contracts, versus 13 for the 1B model.
-- Decision: the pilot will use the 3B model.
-- The 3B model takes about 20 seconds per document on older laptops.
+- Qwen3 4B found the right owner and deadline in 18 of 20 sample contracts, versus 13 for the 1.7B model.
+- Decision: the pilot will use the 4B model.
+- The 4B model takes about 20 seconds per document on older laptops.
 - Riverbend wants written proof that no data leaves the device.
 
 **Action items**

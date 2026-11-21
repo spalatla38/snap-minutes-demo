@@ -1,96 +1,118 @@
-# SNAP Minutes: on-device demo starter kit
+# SNAP Minutes: on-device meeting notes
 
-Upload a short meeting video. SNAP Minutes **transcribes it and pulls out the key points and
-action items entirely on the laptop**. Nothing is uploaded, and it works in airplane mode.
-Every point links to its moment in the video: click the timestamp and the video jumps there.
+Give SNAP Minutes a **meeting video**, or a **transcript or notes file**, and it produces three
+things, **entirely on your computer**:
+
+1. **Transcript download (optional):** a button that saves the transcript with line numbers and timestamps.
+2. **Main bullet points:** decisions, key points and action items, each linked to the line it came from.
+3. **Ask the transcript:** a question box that answers only from the transcript, cites the lines it
+   used, and replies "Not in the transcript." when the answer isn't there.
+
+Nothing is uploaded and nothing is saved: uploads, the transcript and the Q&A index live in memory
+and disappear when you close the app. Every model and library is open source.
 
 ```
-video.mp4 ──► faster-whisper (speech-to-text, on CPU/GPU) ──► timestamped transcript
-                                                                      │
-                     Llama 3.2 3B via Ollama on 127.0.0.1 ◄───────────┘
-                                      │  (JSON: key points, action items, supporting line ids)
-                                      ▼
-            validation: drop invented line ids, attach timestamps, flag unverified points
-                                      ▼
-            Streamlit app on 127.0.0.1 ──► notes + clickable timestamps + privacy receipt
+meeting video ──► faster-whisper (then freed) ─┐
+transcript / notes file ──► readers.py ────────┴─► numbered transcript (in memory)
+                                                       │
+                     ┌─────────────────────────────────┼──────────────────────────────┐
+                     ▼                                 ▼                              ▼
+          1. transcript download          2. bullet points                3. Q&A (rag.py)
+             (.txt / .md)                    Qwen3 via Ollama               all-minilm embeddings
+                                             on 127.0.0.1                   in a NumPy index in RAM
+                                                       │
+                     validation: drop invented line ids, attach times, flag unlinked points
 ```
 
-## What's in the kit
+## Inputs
 
-| File | Purpose |
+| Kind | Formats |
 |---|---|
-| `app.py` | The demo app (Streamlit, local only) |
-| `pipeline.py` | Transcription, key-point extraction, validation, privacy receipt. Also a command-line tool |
-| `setup_mac.sh` / `setup_windows.ps1` | One-time setup: installs packages and downloads all models |
-| `run_demo.sh` / `run_demo.ps1` | Starts the app |
-| `sample/sample_meeting_script.md` | A made-up 2-minute meeting to record as your demo video, with the expected output |
-| `sample/sample_transcript.json` | The same meeting as a transcript, for rehearsing without a video |
-| `tests/test_pipeline.py` | Offline tests (models are mocked) |
-| `DEMO_CHECKLIST.md` | Step-by-step plan for demo day |
-| `.streamlit/config.toml` | Turns off Streamlit usage statistics and binds the app to 127.0.0.1 |
+| Video or audio | `.mp4` `.mov` `.mkv` `.webm` `.m4a` `.mp3` `.wav` |
+| Transcripts | `.vtt` `.srt` (Teams, Zoom and Meet exports keep their times and speakers), `.json` |
+| Notes | `.txt` `.md` `.docx` `.pdf` (text PDFs; scanned PDFs are planned), or paste text into the app |
+
+## Open-source stack
+
+| Part | Choice | Licence |
+|---|---|---|
+| Speech-to-text | Whisper via faster-whisper | MIT |
+| Language model | `qwen3:4b-instruct` (default), `qwen3:1.7b` (low memory), `phi4-mini` | Apache 2.0 / MIT |
+| Embeddings | `all-minilm` (all-MiniLM-L6-v2) | Apache 2.0 |
+| Model runtime | Ollama | MIT |
+| Search index | NumPy, in memory | BSD |
+| PDF text | pdfplumber | MIT |
+| App | Streamlit | Apache 2.0 |
 
 ## Requirements
 
-- **Laptop:** Apple Silicon Mac or a recent Windows laptop with **16 GB RAM** (8 GB works with `llama3.2:1b` and Whisper `base`). About **10 GB** of free disk space.
+- **Laptop:** Windows 10/11 or an Apple Silicon Mac. **16 GB RAM** recommended. With 8 GB, use
+  `qwen3:1.7b` and Whisper `base`. About **6 GB** of free disk for the models.
 - **Software:** Python 3.10 or later and [Ollama](https://ollama.com/download).
 
 ## Setup (once, while online)
 
-**Mac**
-```bash
-./setup_mac.sh
-```
 **Windows (PowerShell)**
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup_windows.ps1
 ```
-This installs the Python packages and downloads Llama 3.2 3B and 1B plus Whisper `base` and `small`.
-After this, **the internet is never needed again**.
-
-## Run the demo
-
-1. Make sure the Ollama app is running (menu bar on Mac, system tray on Windows).
-2. Turn on airplane mode.
-3. Start the app: `./run_demo.sh` (Mac) or `.\run_demo.ps1` (Windows). It opens at http://127.0.0.1:8501.
-4. In the sidebar, click **Warm up model**, then **Check: is this laptop offline?**
-5. Upload your video and click **Transcribe and summarize**.
-
-To rehearse without a video, click **Use sample transcript**.
-
-### Command line (no UI)
+**Mac**
 ```bash
-source .venv/bin/activate
-python pipeline.py my_meeting.mp4 --out notes.md
-python pipeline.py --transcript sample/sample_transcript.json      # skip transcription
-python pipeline.py my_meeting.mp4 --whisper base --llm llama3.2:1b # faster on slow laptops
+./setup_mac.sh
+```
+This installs the Python packages and downloads the models. After this, **no internet is needed**.
+
+## Run
+
+1. Make sure Ollama is running (system tray on Windows, menu bar on Mac).
+2. Turn on airplane mode.
+3. Start the app: `.\run_demo.ps1` (Windows) or `./run_demo.sh` (Mac). It opens at http://127.0.0.1:8501.
+4. Upload a video, transcript or notes file (or paste text, or click **Use sample transcript**), then **Process meeting**.
+5. Use the three tabs: **Bullet points**, **Ask the transcript**, and **Transcript** (with the download buttons).
+
+### Command line
+```bash
+python pipeline.py sample/sample_notes.md --ask "Who builds the progress bar?" --ask "What is the budget?"
+python pipeline.py sample/sample_meeting.vtt --save-transcript transcript.md --out notes.md
+python pipeline.py my_meeting.mp4 --whisper base --llm qwen3:1.7b
 ```
 
 ### Tests
 ```bash
 python tests/test_pipeline.py
 ```
+The tests fake Ollama and Whisper, so they run anywhere without models.
 
-## How privacy is enforced
+## How "local only" is enforced
 
-- **Models run locally:** Whisper runs in-process, and the language model is served by Ollama on `127.0.0.1:11434`.
-- **No model downloads at run time:** `HF_HUB_OFFLINE=1` and `local_files_only=True`, so a missing model fails loudly instead of quietly downloading.
-- **Local-only web app:** Streamlit listens only on `127.0.0.1`, with usage statistics turned off.
-- **Privacy receipt:** after each run, the app lists any non-local network connections held by the app or by Ollama. The expected result is **0**.
-- **Command-line proof for the audience:** `lsof -i -P | grep -iE "ollama|python"` (Mac) or `netstat -ano | findstr 11434` (Windows) should show only `127.0.0.1`.
-- **One exception:** the sidebar's **"Check: is this laptop offline?"** button deliberately tries a single connection to `1.1.1.1` to prove there's no internet. In airplane mode it fails immediately.
+- **No cloud calls:** the language model and embeddings are served by Ollama on `127.0.0.1:11434`.
+  Whisper runs inside the app.
+- **No downloads at run time:** `HF_HUB_OFFLINE=1` and `local_files_only=True`, so a missing model fails
+  loudly instead of quietly downloading.
+- **Nothing saved:** uploaded files stay in memory, and the video is passed to Whisper as bytes, never
+  written to disk. The Q&A index is a NumPy array in RAM.
+- **Memory:** Whisper is released before the language model runs, so the two are never loaded together.
+- **Local-only app:** Streamlit listens only on `127.0.0.1`, with usage statistics turned off.
+- **Privacy receipt:** after each run and each question, the sidebar lists any non-local network
+  connections held by the app or Ollama. The expected result is **0**.
+- **One deliberate exception:** the **"Check: is this laptop offline?"** button tries one connection to
+  `1.1.1.1` to prove there's no internet.
 
 ## Settings
 
 | Environment variable | Default | Use |
 |---|---|---|
-| `SNAP_LLM` | `llama3.2:3b` | Use `llama3.2:1b` on slower laptops |
-| `SNAP_WHISPER` | `small` | `base` is faster; `medium` is more accurate but slow |
-| `SNAP_DEVICE` | `cpu` | Set to `cuda` on an NVIDIA laptop with CUDA 12 and cuDNN 9 installed |
-| `SNAP_OLLAMA_URL` | `http://127.0.0.1:11434` | Change only if Ollama runs on another port |
+| `SNAP_LLM` | `qwen3:4b-instruct` | `qwen3:1.7b` on 8 GB laptops |
+| `SNAP_EMBED` | `all-minilm` | Embedding model for Q&A |
+| `SNAP_WHISPER` | `small` | `base` is faster |
+| `SNAP_DEVICE` | `cpu` | `cuda` on an NVIDIA laptop with CUDA 12 and cuDNN 9 |
+| `SNAP_OLLAMA_URL` | `http://127.0.0.1:11434` | Change only if Ollama uses another port |
 
-## Known limitations
+## Known limitations (Phase 0)
 
-- **No speaker labels:** Whisper doesn't say who is talking, so owners come from names spoken aloud. The sample script ends with a recap that names every owner for this reason.
-- **Small model:** a 3B model can miss implied tasks or misread dates. Points it can't tie to the transcript are marked **"not linked to the transcript"**, so always review before sharing.
-- **Speed:** Whisper `small` on a CPU takes roughly as long as a fraction of the video itself, depending on hardware. Time your own laptop with `DEMO_CHECKLIST.md`.
-- **Scope:** this is a demo, not production software. It has no login, encryption at rest, or multi-user support.
+- **No speaker labels from video:** Whisper doesn't record who spoke. Transcript files that include
+  speaker names (`.vtt` with `<v Name>`, or `Name: text`) keep them.
+- **Small models:** answers and bullets can miss things. Every item links to its source lines, and
+  unlinked items are flagged, so review before sharing.
+- **Q&A is one question at a time:** follow-up questions don't yet use earlier answers.
+- **Scanned PDFs** have no text layer and aren't supported yet.

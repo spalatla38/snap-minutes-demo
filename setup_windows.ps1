@@ -11,9 +11,10 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-Write-Host "Downloading language models (about 3.5 GB)..."
-ollama pull llama3.2:3b
-ollama pull llama3.2:1b
+Write-Host "Downloading open-source models (about 4 GB)..."
+ollama pull qwen3:4b-instruct   # default language model (Apache 2.0)
+ollama pull qwen3:1.7b          # low-memory option (Apache 2.0)
+ollama pull all-minilm          # embeddings for Q&A (Apache 2.0)
 
 Write-Host "Downloading Whisper speech-to-text models..."
 $env:HF_HUB_OFFLINE = "0"

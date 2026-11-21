@@ -1,4 +1,7 @@
+# All permissively licensed (MIT / Apache 2.0 / BSD). Everything runs locally.
 streamlit>=1.36
 faster-whisper>=1.0.3
 requests>=2.31
 psutil>=5.9
+numpy>=1.26
+pdfplumber>=0.11

@@ -49,22 +49,22 @@
   {
    "start": 36.7,
    "end": 43.6,
-   "text": "On the model side, we tested Llama 3.2 3B against the 1B model on our twenty sample contracts."
+   "text": "On the model side, we tested Qwen3 4B against the 1.7B model on our twenty sample contracts."
   },
   {
    "start": 43.9,
    "end": 48.9,
-   "text": "The 3B model got the right owner and deadline in eighteen of twenty."
+   "text": "The 4B model got the right owner and deadline in eighteen of twenty."
   },
   {
    "start": 49.2,
    "end": 51.5,
-   "text": "The 1B model only got thirteen."
+   "text": "The 1.7B model only got thirteen."
   },
   {
    "start": 51.8,
    "end": 54.9,
-   "text": "So I recommend we ship the 3B model."
+   "text": "So I recommend we ship the 4B model."
   },
   {
    "start": 55.2,
@@ -74,12 +74,12 @@
   {
    "start": 57.5,
    "end": 61.4,
-   "text": "Decision: we go with the 3B model for the pilot."
+   "text": "Decision: we go with the 4B model for the pilot."
   },
   {
    "start": 61.7,
    "end": 67.0,
-   "text": "One concern: the 3B model takes about twenty seconds per document on older laptops."
+   "text": "One concern: the 4B model takes about twenty seconds per document on older laptops."
   },
   {
    "start": 67.3,
