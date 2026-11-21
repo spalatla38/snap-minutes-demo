@@ -11,6 +11,10 @@ requests>=2.31
 psutil>=5.9
 numpy>=1.26
 pdfplumber>=0.11
+# PC service for the hosted page (server.py). Streamlit pulls these in today, but server.py
+# imports them directly, so they are listed here rather than relied on transitively.
+starlette>=0.40
+uvicorn>=0.30
 # Speaker names from video (speakers.py): voices with sherpa-onnx (Apache 2.0), names on
 # screen with RapidOCR (Apache 2.0; brings opencv-python, Shapely, pyclipper). The two
 # speaker models are downloaded into models/ by the setup script.
