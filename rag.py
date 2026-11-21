@@ -71,8 +71,10 @@ def make_passages(segments: list[Segment], size: int = PASSAGE_LINES,
     return out
 
 
-def embed(texts: list[str], model: str = EMBED_MODEL, batch: int = 64) -> np.ndarray:
-    """Embed texts with the local Ollama embedding model; returns normalized rows."""
+def embed(texts: list[str], model: str = EMBED_MODEL, batch: int = 64,
+          on_progress=None) -> np.ndarray:
+    """Embed texts with the local Ollama embedding model; returns normalized rows.
+    on_progress(fraction) is called after each batch."""
     vecs = []
     for i in range(0, len(texts), batch):
         r = requests.post(f"{P.OLLAMA_URL}/api/embed",
@@ -80,16 +82,18 @@ def embed(texts: list[str], model: str = EMBED_MODEL, batch: int = 64) -> np.nda
                           timeout=300)
         r.raise_for_status()
         vecs.extend(r.json()["embeddings"])
+        if on_progress:
+            on_progress(len(vecs) / len(texts))
     m = np.asarray(vecs, dtype=np.float32)
     norms = np.linalg.norm(m, axis=1, keepdims=True)
     return m / np.where(norms == 0, 1, norms)
 
 
-def build_index(segments: list[Segment], model: str = EMBED_MODEL) -> Index:
+def build_index(segments: list[Segment], model: str = EMBED_MODEL, on_progress=None) -> Index:
     if not segments:
         raise ValueError("The transcript is empty.")
     passages = make_passages(segments)
-    return Index(passages, embed([p.text for p in passages], model), model)
+    return Index(passages, embed([p.text for p in passages], model, on_progress=on_progress), model)
 
 
 def retrieve(question: str, index: Index, k: int = TOP_K) -> list[tuple[Passage, float]]:

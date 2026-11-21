@@ -41,5 +41,5 @@ def transcript_md(segments: list[Segment], title: str = "Transcript") -> str:
     for s in segments:
         ts = f"`{fmt_ts(s.start)}` " if s.start is not None else ""
         out.append(f"{s.id}. {ts}{s.text}")
-    out += ["", "_Created on this device by SNAP Minutes. Nothing was uploaded._"]
+    out += ["", "_Created on this device by SNAP Assist. Nothing was uploaded._"]
     return "\n".join(out) + "\n"

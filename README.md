@@ -1,6 +1,6 @@
-# SNAP Minutes: on-device meeting notes
+# SNAP Assist: on-device meeting notes
 
-Give SNAP Minutes a **meeting video**, or a **transcript or notes file**, and it produces three
+Give SNAP Assist a **meeting video**, or a **transcript or notes file**, and it produces three
 things, **entirely on your computer**:
 
 1. **Transcript download (optional):** a button that saves the transcript with line numbers and timestamps.
@@ -79,7 +79,13 @@ This installs the Python packages and downloads the models. After this, **no int
 2. Turn on airplane mode.
 3. Start the app: `.\run_demo.ps1` (Windows) or `./run_demo.sh` (Mac). It opens at http://127.0.0.1:8501.
 4. Upload a video, transcript or notes file (or paste text, or click **Use sample transcript**), then **Process meeting**.
-5. Use the three tabs: **Bullet points**, **Ask the transcript**, and **Transcript** (with the download buttons).
+   While it works, an animated panel shows **% done, time remaining and elapsed time**, plus a step
+   tracker (transcribe or read → Q&A index → bullet points). The percentage follows real progress:
+   Whisper's position in the audio, embedding batches, and tokens the model has written. The ETA starts
+   from speeds measured on the reference laptop, shows "≈" until the current step reports progress,
+   and adapts to this laptop after the first run.
+5. Use the three tabs: **Bullet points** (each with a 📍 Source popover; tick off action items),
+   **Ask the transcript** (chat, with suggested questions), and **Transcript** (search and downloads).
 
 ### Command line
 ```bash

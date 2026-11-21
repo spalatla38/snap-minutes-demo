@@ -249,6 +249,25 @@ def test_transcribe_with_fake_whisper_frees_model_and_skips_empty():
     assert info["language"] == "en" and progress[-1] == 1.0 and freed
 
 
+def test_transcribe_without_onnxruntime_turns_vad_off_instead_of_failing():
+    seg = types.SimpleNamespace(start=0, end=2, text="Hi.")
+    used = {}
+
+    class FakeModel:
+        def __init__(self, *a, **kw):
+            pass
+
+        def transcribe(self, audio, **kw):
+            used["vad"] = kw["vad_filter"]
+            return iter([seg]), types.SimpleNamespace(language="en", duration=2.0)
+
+    with mock.patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeModel),
+                                       "onnxruntime": None}):  # None makes the import fail
+        assert P.vad_available() is False
+        segs, meta = P.transcribe(io.BytesIO(b"x"), device="cpu")
+    assert used["vad"] is False and meta["vad"] is False and segs[0].text == "Hi."
+
+
 def test_gpu_first_then_cpu_fallback():
     """With an NVIDIA GPU visible but CUDA libraries missing, transcription must still
     succeed on the CPU and report why."""
@@ -354,6 +373,210 @@ def test_nothing_written_to_disk_by_readers_and_rag(tmp_path=None):
     with mock.patch.object(rag.requests, "post", side_effect=FakeOllama()):
         rag.build_index(segs)
     assert set(os.listdir(ROOT)) - before <= {"__pycache__"}
+
+
+# ----------------------------------------------------------------- progress bar and ETA
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def _tracker(clock):
+    from progress import Stage, Tracker
+    return Tracker([Stage("input", "Read", 2.0), Stage("index", "Index", 1.0),
+                    Stage("notes", "Notes", 10.0)], clock=clock)
+
+
+def test_tracker_percent_and_eta_follow_measured_progress():
+    clock = FakeClock()
+    tr = _tracker(clock)
+    snap = tr.snapshot()
+    assert snap["percent"] == 0 and abs(snap["eta"] - 13.0) < 1e-6 and not snap["done"]
+    tr.begin("input")
+    clock.t = 1.0
+    tr.update("input", 0.5)
+    snap = tr.snapshot()
+    # half the input stage in 1 s: about 1 s left there, plus 11 s of pending stages
+    assert 11.5 < snap["eta"] < 12.5 and snap["eta_measured"] and snap["current"] == "input"
+    tr.finish("input"); tr.begin("index"); tr.finish("index"); tr.begin("notes")
+    clock.t = 3.0
+    tr.update("notes", 0.10)        # going slowly: 10% after 2 s
+    slow = tr.snapshot()
+    assert slow["eta"] > 8.5        # above the 8 s left by the estimate alone: the slow rate counts
+    clock.t = 30.0                  # long past the estimate with no news
+    late = tr.snapshot()
+    assert late["eta"] >= 0.9 and late["percent"] < 1.0   # never claims to be finished early
+    tr.finish("notes")
+    done = tr.snapshot()
+    assert done["done"] and done["percent"] == 1.0 and done["eta"] == 0
+
+
+def test_tracker_percent_never_goes_backwards():
+    clock = FakeClock()
+    tr = _tracker(clock)
+    tr.begin("input")
+    seen = []
+    for step in range(1, 40):
+        clock.t = step * 0.5
+        tr.update("input", min(step / 10, 0.9))
+        if step == 20:
+            tr.set_estimate("notes", 100.0)   # a sudden much bigger estimate
+        seen.append(tr.snapshot()["percent"])
+    assert seen == sorted(seen) and max(seen) < 1.0
+
+
+def test_tracker_restart_resets_stage_progress():
+    clock = FakeClock()
+    tr = _tracker(clock)
+    tr.update("input", 0.6)
+    tr.restart("input", "retrying on CPU")
+    st = tr.snapshot()["stages"][0]
+    assert st["frac"] == 0 and st["state"] == "active"
+
+
+def test_fmt_duration():
+    from progress import fmt_duration
+    assert fmt_duration(12.4) == "12 s" and fmt_duration(75) == "1 min 15 s" and fmt_duration(-3) == "0 s"
+
+
+class FakeStream:
+    def __init__(self, pieces):
+        self.lines = [json.dumps({"message": {"content": p}, "done": False}).encode() for p in pieces]
+        self.lines.append(json.dumps({"message": {"content": ""}, "done": True}).encode())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_lines(self):
+        return iter(self.lines)
+
+
+def test_chat_json_streams_tokens_when_asked():
+    reply = json.dumps({"title": "t", "summary": "s", "key_points": [], "action_items": []})
+    pieces = [reply[i:i + 5] for i in range(0, len(reply), 5)]
+    sent = {}
+
+    def fake_post(url, json=None, timeout=None, stream=False):  # noqa: A002
+        sent.update(payload=json, stream=stream)
+        return FakeStream(pieces)
+
+    ticks = []
+    with mock.patch.object(P.requests, "post", side_effect=fake_post):
+        out = P.chat_json("qwen3:4b-instruct", "sys", "user", P.NOTES_SCHEMA,
+                          on_token=lambda n, text: ticks.append((n, len(text))))
+    assert out["title"] == "t" and sent["stream"] is True and sent["payload"]["stream"] is True
+    assert [n for n, _ in ticks] == list(range(1, len(pieces) + 1)) and ticks[-1][1] == len(reply)
+
+
+def test_extract_notes_progress_is_monotonic_and_ends_at_one():
+    segs = readers.read_file(JSON_SAMPLE.name, JSON_SAMPLE.read_bytes())
+    notes = {"title": "t", "summary": "s", "key_points": [{"point": "p", "segments": [1]}], "action_items": []}
+    body = json.dumps(notes)
+
+    def fake_post(url, json=None, timeout=None, stream=False):  # noqa: A002
+        return FakeStream([body[i:i + 3] for i in range(0, len(body), 3)])
+
+    seen = []
+    with mock.patch.object(P.requests, "post", side_effect=fake_post):
+        out = P.extract_notes(segs, max_chars=500, on_progress=lambda f, info: seen.append((f, info)))
+    fracs = [f for f, _ in seen]
+    calls = len(P.note_calls(segs, 500))
+    assert calls > 2 and fracs == sorted(fracs) and fracs[-1] == 1.0 and max(fracs[:-1]) < 1.0
+    assert {info["call"] for _, info in seen} == set(range(1, calls + 1))
+    assert out["key_points"][0]["verified"]
+
+
+def test_rebase_ignores_time_spent_before_writing_started():
+    def eta(rebase):
+        clock = FakeClock()
+        tr = _tracker(clock)
+        tr.finish("input"); tr.finish("index"); tr.begin("notes")
+        clock.t = 4.0            # 4 s reading the transcript, no progress
+        if rebase:
+            tr.rebase("notes")
+        clock.t = 5.0
+        tr.update("notes", 0.5)  # then half the reply in 1 s
+        return tr.snapshot()["eta"]
+    # measured part: 1 s left (with rebase) vs 5 s left (without); blended 50/50 with the
+    # estimate's 5 s left -> 3 s vs 5 s
+    assert abs(eta(True) - 3.0) < 1e-6 and abs(eta(False) - 5.0) < 1e-6
+
+
+def test_reply_fraction_knows_the_total_once_the_lists_are_done():
+    guess = {"tokens": 1000, "total": None}
+    # Ollama's order: both lists first, then the short fields
+    assert P._reply_fraction(400, '{"action_items":[...],"key_points":[...', guess) == 0.4
+    assert P._reply_fraction(950, '{"action_items":[...],"key_points":[...', guess) == P.LISTS_CAP
+    f = P._reply_fraction(500, '{"action_items":[],"key_points":[],"summary":"', guess)
+    # summary just started and title not seen yet: about 2 short fields (70 tokens) left
+    assert guess["total"] == 500 + 2 * P.SHORT_FIELD_TOKENS and abs(f - 500 / 570) < 1e-9
+    # schema order (short fields first): the lists end the reply, so stay on the rough guess
+    g2 = {"tokens": 1000, "total": None}
+    assert P._reply_fraction(300, '{"title":"t","summary":"s","key_points":[],"action_items":[', g2) == 0.3
+    assert g2["total"] is None
+
+
+def test_streamed_notes_progress_uses_the_reply_shape():
+    segs = [Segment(1, None, None, "Sai will build the bar.")]
+    pieces = ['{"action_items":[],', '"key_points":[],', '"summary":"s",', '"title":"t"}']
+
+    def fake_post(url, json=None, timeout=None, stream=False):  # noqa: A002
+        return FakeStream(pieces)
+
+    seen = []
+    with mock.patch.object(P.requests, "post", side_effect=fake_post):
+        P.extract_notes(segs, on_progress=lambda f, info: seen.append(f))
+    # seen: [start, token 1, token 2, token 3 (summary after both lists), token 4, finished]
+    assert seen[3] == 3 / (3 + 2 * P.SHORT_FIELD_TOKENS) and seen == sorted(seen) and seen[-1] == 1.0
+
+
+def test_model_loaded_reads_ollama_ps():
+    ps = FakeResp({"models": [{"name": "qwen3:4b-instruct"}]})
+    with mock.patch.object(P.requests, "get", return_value=ps):
+        assert P.model_loaded("qwen3:4b-instruct") and not P.model_loaded("qwen3:1.7b")
+    with mock.patch.object(P.requests, "get", side_effect=P.requests.ConnectionError()):
+        assert not P.model_loaded("qwen3:4b-instruct")
+
+
+def test_transcribe_reports_duration_and_device():
+    seg = types.SimpleNamespace(start=0, end=2, text="Hi.")
+
+    class FakeModel:
+        def __init__(self, *a, **kw):
+            pass
+
+        def transcribe(self, audio, **kw):
+            return iter([seg]), types.SimpleNamespace(language="en", duration=42.0)
+
+    infos = []
+    with mock.patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeModel)}):
+        P.transcribe(io.BytesIO(b"x"), device="cpu", on_info=infos.append)
+    assert infos == [{"duration": 42.0, "device": "cpu"}]
+
+
+def test_index_reports_progress():
+    segs = readers.read_file(JSON_SAMPLE.name, JSON_SAMPLE.read_bytes())
+    seen = []
+    with mock.patch.object(rag.requests, "post", side_effect=FakeOllama()):
+        rag.build_index(segs, on_progress=seen.append)
+    assert seen and seen[-1] == 1.0
+
+
+def test_ui_escapes_transcript_text():
+    import ui
+    out = ui.transcript_html([(1, "00:05", "<script>alert(1)</script> budget")], "budget")
+    assert "<script>" not in out and "&lt;script&gt;" in out and "<mark>budget</mark>" in out
+    snap = _tracker(FakeClock()).snapshot()
+    assert "sa-proc" in ui.progress_panel(snap, video=True)
 
 
 if __name__ == "__main__":
