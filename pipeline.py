@@ -31,7 +31,7 @@ DEFAULT_LLM = os.environ.get("SNAP_LLM", "qwen3:4b-instruct")
 LOW_MEMORY_LLM = "qwen3:1.7b"
 LLM_CHOICES = ["qwen3:4b-instruct", "qwen3:1.7b", "phi4-mini"]
 DEFAULT_WHISPER = os.environ.get("SNAP_WHISPER", "small")
-DEFAULT_DEVICE = os.environ.get("SNAP_DEVICE", "cpu")  # "cuda" on an NVIDIA laptop with CUDA 12 + cuDNN 9
+DEFAULT_DEVICE = os.environ.get("SNAP_DEVICE", "auto")  # auto: NVIDIA GPU if usable, else CPU; or "cpu" / "cuda"
 MAX_CHARS_PER_CALL = 12_000  # ~3k tokens of transcript per model call
 VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav"}
 
@@ -39,33 +39,47 @@ VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".mp3", ".wav"}
 # --------------------------------------------------------------------------- #
 # 1. Transcription (video/audio input, on device)
 # --------------------------------------------------------------------------- #
-def transcribe(
-    path: str,
-    model_size: str = DEFAULT_WHISPER,
-    device: str = DEFAULT_DEVICE,
-    compute_type: str = "int8",
-    language: Optional[str] = None,
-    on_progress: Optional[Callable[[float], None]] = None,
-) -> tuple[list[Segment], dict]:
-    """Transcribe a video or audio file locally. faster-whisper decodes the audio
-    track itself, so ffmpeg is not required. The Whisper model is released from
-    memory before returning, so it never sits in RAM next to the language model."""
+def _add_nvidia_dll_dirs() -> None:
+    """On Windows, the CUDA libraries installed by the setup script (nvidia-cublas-cu12,
+    nvidia-cudnn-cu12) live in site-packages/nvidia/*/bin, which Windows doesn't search."""
+    if os.name != "nt":
+        return
+    import glob
+    import site
+    roots = list(site.getsitepackages()) + [site.getusersitepackages()]
+    for root in roots:
+        for d in glob.glob(os.path.join(root, "nvidia", "*", "bin")):
+            try:
+                os.add_dll_directory(d)
+            except (OSError, AttributeError):
+                pass
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+
+def cuda_available() -> bool:
+    """True if CTranslate2 (faster-whisper's engine) can see an NVIDIA GPU."""
     try:
-        from faster_whisper import WhisperModel
-    except ImportError as e:  # pragma: no cover
-        raise RuntimeError("faster-whisper is not installed. Run the setup script.") from e
+        import ctranslate2
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def _run_whisper(audio, model_size, device, compute_type, language, on_progress):
+    from faster_whisper import WhisperModel
 
     try:
         model = WhisperModel(model_size, device=device, compute_type=compute_type,
                              local_files_only=True)
     except Exception as e:
+        if device != "cpu":
+            raise  # the caller falls back to the CPU
         raise RuntimeError(
             f"Whisper model '{model_size}' is not on this machine yet. "
             "Run the setup script once while online to download it."
         ) from e
-
     try:
-        seg_iter, info = model.transcribe(path, beam_size=5, vad_filter=True, language=language)
+        seg_iter, info = model.transcribe(audio, beam_size=5, vad_filter=True, language=language)
         segments: list[Segment] = []
         for s in seg_iter:
             text = s.text.strip()
@@ -73,13 +87,56 @@ def transcribe(
                 segments.append(Segment(len(segments) + 1, float(s.start), float(s.end), text))
             if on_progress and info.duration:
                 on_progress(min(s.end / info.duration, 1.0))
-        meta = {"language": info.language, "duration": info.duration}
+        return segments, {"language": info.language, "duration": info.duration}
     finally:
-        del model
+        del model  # free Whisper before the language model runs
         gc.collect()
-    if on_progress:
-        on_progress(1.0)
-    return segments, meta
+
+
+def transcribe(
+    audio,
+    model_size: str = DEFAULT_WHISPER,
+    device: str = DEFAULT_DEVICE,
+    compute_type: Optional[str] = None,
+    language: Optional[str] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
+) -> tuple[list[Segment], dict]:
+    """Transcribe a video or audio file (a path or in-memory bytes) locally.
+
+    device="auto" tries the NVIDIA GPU first and falls back to the CPU if the GPU or its
+    CUDA libraries aren't usable, so a driver problem never breaks the demo.
+    faster-whisper decodes the audio track itself, so ffmpeg is not required."""
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError("faster-whisper is not installed. Run the setup script.") from e
+
+    _add_nvidia_dll_dirs()
+    attempts = []
+    if device == "cuda" or (device == "auto" and cuda_available()):
+        attempts.append(("cuda", compute_type or "float16"))
+    attempts.append(("cpu", compute_type if device == "cpu" and compute_type else "int8"))
+
+    gpu_error = None
+    for dev, ctype in attempts:
+        if hasattr(audio, "seek"):
+            audio.seek(0)
+        try:
+            segments, meta = _run_whisper(audio, model_size, dev, ctype, language, on_progress)
+        except Exception as e:
+            if dev == "cpu":
+                raise
+            gpu_error = e
+            if on_progress:
+                on_progress(0.0)
+            continue
+        meta["device"] = dev
+        if gpu_error is not None:
+            meta["gpu_error"] = str(gpu_error)[:300]
+        if on_progress:
+            on_progress(1.0)
+        return segments, meta
+    raise RuntimeError("Transcription failed.")  # pragma: no cover
 
 
 def load_input(path: str, **whisper_kwargs) -> tuple[list[Segment], dict]:

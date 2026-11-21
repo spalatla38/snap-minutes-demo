@@ -249,6 +249,46 @@ def test_transcribe_with_fake_whisper_frees_model_and_skips_empty():
     assert info["language"] == "en" and progress[-1] == 1.0 and freed
 
 
+def test_gpu_first_then_cpu_fallback():
+    """With an NVIDIA GPU visible but CUDA libraries missing, transcription must still
+    succeed on the CPU and report why."""
+    seg = types.SimpleNamespace(start=0, end=2, text="Hello team.")
+    tried = []
+
+    class FakeModel:
+        def __init__(self, size, device, compute_type, local_files_only):
+            tried.append((device, compute_type))
+            if device == "cuda":
+                raise RuntimeError("Library cublas64_12.dll is not found")
+
+        def transcribe(self, audio, **kw):
+            return iter([seg]), types.SimpleNamespace(language="en", duration=2.0)
+
+    fake_ct2 = types.SimpleNamespace(get_cuda_device_count=lambda: 1)
+    with mock.patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeModel),
+                                       "ctranslate2": fake_ct2}):
+        segs, meta = P.transcribe(io.BytesIO(b"x"))
+    assert tried == [("cuda", "float16"), ("cpu", "int8")]
+    assert meta["device"] == "cpu" and "cublas" in meta["gpu_error"] and segs[0].text == "Hello team."
+
+
+def test_gpu_used_when_it_works():
+    seg = types.SimpleNamespace(start=0, end=2, text="Hi.")
+
+    class FakeModel:
+        def __init__(self, size, device, compute_type, local_files_only):
+            self.device = device
+
+        def transcribe(self, audio, **kw):
+            return iter([seg]), types.SimpleNamespace(language="en", duration=2.0)
+
+    fake_ct2 = types.SimpleNamespace(get_cuda_device_count=lambda: 1)
+    with mock.patch.dict(sys.modules, {"faster_whisper": types.SimpleNamespace(WhisperModel=FakeModel),
+                                       "ctranslate2": fake_ct2}):
+        _, meta = P.transcribe(io.BytesIO(b"x"))
+    assert meta["device"] == "cuda" and "gpu_error" not in meta
+
+
 # ----------------------------------------------------------------- Q&A (RAG)
 def test_passages_overlap_and_cover_every_line():
     segs = [Segment(i, None, None, f"line {i}") for i in range(1, 10)]

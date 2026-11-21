@@ -54,11 +54,12 @@ with st.sidebar:
     st.header("⚙️ Settings")
     llm = st.selectbox("Language model (open source)", P.LLM_CHOICES,
                        help="qwen3:4b-instruct is the default. qwen3:1.7b uses less memory.")
-    whisper_size = st.selectbox("Speech-to-text for video (Whisper)", ["base", "small", "medium"], index=1,
+    whisper_size = st.selectbox("Speech-to-text for video (Whisper)", ["base", "small"], index=1,
                                 help="'base' is fastest; 'small' is the best balance.")
     ok_llm, msg_llm = P.check_ollama(llm)
     ok_emb, msg_emb = P.check_ollama(rag.EMBED_MODEL)
     (st.success if ok_llm else st.error)(msg_llm)
+    st.caption("Transcription: " + ("NVIDIA GPU available" if P.cuda_available() else "CPU (no usable NVIDIA GPU found)"))
     if not ok_emb:
         st.error(msg_emb)
     ready = ok_llm and ok_emb
@@ -115,10 +116,12 @@ if run or sample:
             segments, source = readers.read_file(SAMPLE.name, SAMPLE.read_bytes()), "sample transcript"
         elif ss.media is not None and is_video(ss.media_name):
             bar = st.progress(0.0, text="Step 1 of 3: transcribing on this device...")
-            segments, _ = P.transcribe(io.BytesIO(ss.media), model_size=whisper_size,
-                                       on_progress=lambda p: bar.progress(p, text=f"Step 1 of 3: transcribing on this device... {p:.0%}"))
+            segments, meta = P.transcribe(io.BytesIO(ss.media), model_size=whisper_size,
+                                          on_progress=lambda p: bar.progress(p, text=f"Step 1 of 3: transcribing on this device... {p:.0%}"))
             bar.empty()
-            source = ss.media_name
+            source = f"{ss.media_name} (Whisper on {'GPU' if meta['device'] == 'cuda' else 'CPU'})"
+            if meta.get("gpu_error"):
+                st.toast("GPU transcription wasn't available, so the CPU was used. See README: GPU setup.")
         elif ss.media is not None:
             segments, source = readers.read_file(ss.media_name, ss.media), ss.media_name
         else:

@@ -47,7 +47,9 @@ transcript / notes file ──► readers.py ────────┴─► n
 ## Requirements
 
 - **Laptop:** Windows 10/11 or an Apple Silicon Mac. **16 GB RAM** recommended. With 8 GB, use
-  `qwen3:1.7b` and Whisper `base`. About **6 GB** of free disk for the models.
+  `qwen3:1.7b` and Whisper `base`. About **6 GB** of free disk for the models (plus about 1 GB of
+  CUDA libraries on Windows laptops with an NVIDIA GPU).
+- **Reference laptop:** Windows, 16 GB RAM, NVIDIA RTX 3060. Defaults: `qwen3:4b-instruct` and Whisper `small`.
 - **Software:** Python 3.10 or later and [Ollama](https://ollama.com/download).
 
 ## Setup (once, while online)
@@ -61,6 +63,15 @@ powershell -ExecutionPolicy Bypass -File setup_windows.ps1
 ./setup_mac.sh
 ```
 This installs the Python packages and downloads the models. After this, **no internet is needed**.
+
+## GPU setup (NVIDIA)
+
+- **Language model:** Ollama uses an NVIDIA GPU automatically. Nothing to configure.
+- **Transcription:** `setup_windows.ps1` installs the CUDA libraries Whisper needs (`nvidia-cublas-cu12`,
+  `nvidia-cudnn-cu12`) when it finds an NVIDIA GPU. The app then transcribes on the GPU.
+- **If the GPU can't be used** (missing libraries, old driver), transcription falls back to the CPU on its
+  own and the app shows a notice. The sidebar says which one is available.
+- **Check:** run `nvidia-smi` in a terminal. It should list the GPU and a driver version.
 
 ## Run
 
@@ -105,7 +116,7 @@ The tests fake Ollama and Whisper, so they run anywhere without models.
 | `SNAP_LLM` | `qwen3:4b-instruct` | `qwen3:1.7b` on 8 GB laptops |
 | `SNAP_EMBED` | `all-minilm` | Embedding model for Q&A |
 | `SNAP_WHISPER` | `small` | `base` is faster |
-| `SNAP_DEVICE` | `cpu` | `cuda` on an NVIDIA laptop with CUDA 12 and cuDNN 9 |
+| `SNAP_DEVICE` | `auto` | `auto` tries the NVIDIA GPU, then falls back to the CPU; force with `cpu` or `cuda` |
 | `SNAP_OLLAMA_URL` | `http://127.0.0.1:11434` | Change only if Ollama uses another port |
 
 ## Known limitations (Phase 0)

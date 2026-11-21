@@ -4,6 +4,8 @@
 - [ ] Run the setup script on the demo laptop (Sai's Windows laptop) and on Precious's Mac.
 - [ ] Record the sample meeting (`sample/sample_meeting_script.md`) as a 1.5–2.5 minute `.mp4`.
       The backup inputs are already in `sample/`: `sample_meeting.vtt` (transcript) and `sample_notes.md` (notes).
+- [ ] Check the sidebar says **NVIDIA GPU available**, and that a video run shows "Whisper on GPU".
+      If it says CPU, rerun `setup_windows.ps1` or update the NVIDIA driver; the demo still works on CPU.
 - [ ] Run the full demo offline once with each input and **time it**:
       Video: ____ s   Transcript file: ____ s   One question: ____ s
 - [ ] If a run is over 90 seconds, switch to Whisper `base` and/or `qwen3:1.7b` and time it again.
