@@ -29,7 +29,7 @@ import ui
 from backend import Busy, LocalBackend, RemoteBackend, RemoteError
 from jobs import new_rates
 from progress import fmt_duration
-from segments import fmt_ts, has_times, transcript_md, transcript_txt
+from segments import fmt_ts, has_times, said, transcript_md, transcript_txt
 
 VIDEO_EXT = sorted(e.lstrip(".") for e in P.VIDEO_TYPES)
 TEXT_EXT = sorted(e.lstrip(".") for e in readers.TEXT_TYPES)
@@ -58,7 +58,8 @@ st.markdown(ui.CSS, unsafe_allow_html=True)
 ss = st.session_state
 for key, default in {"start": 0, "media": None, "media_name": None, "segments": None, "notes": None,
                      "ref": None, "qa": [], "timings": {}, "receipt": None, "source": None,
-                     "pending_q": None, "rates": None, "run_id": 0}.items():
+                     "pending_q": None, "rates": None, "run_id": 0, "speakers": None,
+                     "speakers_off": ""}.items():
     ss.setdefault(key, default)
 if ss.rates is None:
     ss.rates = new_rates()
@@ -111,11 +112,18 @@ def backend_status(llm: str, mode: str) -> dict:
     return backend.status(llm)
 
 
+@st.cache_data(show_spinner=False)
+def speakers_ready() -> tuple[bool, str]:
+    import speakers
+    return speakers.available()
+
+
 def reset(media=None, media_name=None):
     if ss.get("ref") is not None:
         backend.end(ss.ref)  # hosted: frees this session's slot on the PC right away
     ss.update(media=media, media_name=media_name, segments=None, notes=None, ref=None,
-              qa=[], timings={}, receipt=None, start=0, source=None, pending_q=None)
+              qa=[], timings={}, receipt=None, start=0, source=None, pending_q=None,
+              speakers=None, speakers_off="")
 
 
 def jump(seconds):
@@ -129,7 +137,7 @@ def is_video(name) -> bool:
 def line_tuples(segments, ids=None):
     by_id = {s.id: s for s in segments}
     pick = [by_id[i] for i in ids if i in by_id] if ids is not None else segments
-    return [(s.id, fmt_ts(s.start) if s.start is not None else "", s.text) for s in pick]
+    return [(s.id, fmt_ts(s.start) if s.start is not None else "", said(s)) for s in pick]
 
 
 def source_controls(item_start, ids, key):
@@ -143,19 +151,63 @@ def source_controls(item_start, ids, key):
                   help="Jump the video to this moment")
 
 
+def busy_message() -> str:
+    return ("⏳ The SNAP Assist PC is already serving the most people it allows at once. "
+            "Please try again in a few minutes." if backend.remote else
+            "⏳ Someone else is processing a meeting on this PC right now. Please try again in a minute.")
+
+
 def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
     video = job["kind"] == "video"
     try:
         run = backend.start(job, llm, whisper_size, ss.rates)
     except Busy:
-        st.warning("⏳ The SNAP Assist PC is already serving the most people it allows at once. "
-                   "Please try again in a few minutes." if backend.remote else
-                   "⏳ Someone else is processing a meeting on this PC right now. Please try again in a minute.")
+        st.warning(busy_message())
         return
     except RemoteError as e:
         st.error(str(e))
         return
+    res = drive(run, video)
+    if res is None:
+        return
+    notices = res["notices"]
+    if notices.get("vad_off"):
+        st.toast("Silence filter (VAD) unavailable: onnxruntime did not load, so the whole audio "
+                 "was transcribed. Run: pip install onnxruntime==1.20.1")
+    if notices.get("gpu_error"):
+        st.toast("GPU transcription wasn't available, so the CPU was used. See README: GPU setup.")
+    time.sleep(0.9)  # let the finished state (green check, 100%) show for a moment
+    ss.update(segments=res["segments"], ref=res["ref"], notes=res["notes"], qa=[], start=0,
+              source=res["source"], timings=res["timings"], receipt=backend.receipt(),
+              speakers=res.get("speakers"), speakers_off=notices.get("speakers_off", ""),
+              pending_q=None, run_id=ss.run_id + 1)
+    st.rerun()
 
+
+def rename_speakers(names: dict, llm: str) -> None:
+    """Apply the names typed in the Speakers panel and rewrite the bullet points."""
+    try:
+        run = backend.rename(ss.segments, names, llm, ss.rates)
+    except Busy:
+        st.warning(busy_message())
+        return
+    res = drive(run, video=False)
+    if res is None:
+        return
+    for s in ss.speakers:
+        new = names.get(s["label"], "").strip()
+        if new != s["name"]:  # only names the user actually changed count as theirs
+            s["name"], s["source"] = new, ("you" if new else "")
+    time.sleep(0.6)
+    ss.update(segments=res["segments"], ref=res["ref"], notes=res["notes"], qa=[],
+              timings={**ss.timings, **res["timings"]}, run_id=ss.run_id + 1)
+    st.toast("Speaker names applied, and action items rewritten.")
+    st.rerun()
+
+
+def drive(run, video: bool):
+    """Show the animated progress panel until `run` finishes. Returns its result, or None
+    after showing an error."""
     panel = st.empty()
     failures = 0
     while True:
@@ -167,7 +219,7 @@ def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
             if failures >= 4:
                 panel.empty()
                 st.error(f"Lost the connection to the SNAP Assist PC: {e}")
-                return
+                return None
             time.sleep(1.5)
             continue
         snap = out["snapshot"]
@@ -184,18 +236,8 @@ def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
     if out["state"] == "error":
         panel.empty()
         st.error(f"Something went wrong: {out.get('error')}")
-        return
-    res = out["result"]
-    if res["notices"].get("vad_off"):
-        st.toast("Silence filter (VAD) unavailable: onnxruntime did not load, so the whole audio "
-                 "was transcribed. Run: pip install onnxruntime==1.20.1")
-    if res["notices"].get("gpu_error"):
-        st.toast("GPU transcription wasn't available, so the CPU was used. See README: GPU setup.")
-    time.sleep(0.9)  # let the finished state (green check, 100%) show for a moment
-    ss.update(segments=res["segments"], ref=res["ref"], notes=res["notes"], qa=[], start=0,
-              source=res["source"], timings=res["timings"], receipt=backend.receipt(),
-              pending_q=None, run_id=ss.run_id + 1)
-    st.rerun()
+        return None
+    return out["result"]
 
 
 # ------------------------------------------------------------------ sidebar
@@ -215,6 +257,9 @@ with st.sidebar:
         (st.success if stat["ok_llm"] else st.error)(
             ("Host PC connected · " if MODE == "hosted" else "") + stat["msg_llm"])
         st.caption("Transcription: " + ("NVIDIA GPU available" if stat["cuda"] else "CPU (no usable NVIDIA GPU found)"))
+        if MODE != "hosted":
+            sp_ok, sp_msg = speakers_ready()
+            st.caption("Speaker names from video: " + ("✅ ready" if sp_ok else f"⚠️ {sp_msg}"))
         if not stat["ok_emb"]:
             st.error(stat["msg_emb"])
         if MODE == "hosted":
@@ -319,13 +364,45 @@ if ss.segments:
     m2.metric("Key points", len(notes["key_points"]))
     m3.metric("Action items", len(notes["action_items"]))
     m4.metric("Processed in", fmt_duration(sum(t.values())),
-              help=f"Read {t.get('read', 0):.1f} s · index {t.get('index', 0):.1f} s · bullets {t.get('notes', 0):.1f} s")
+              help=f"Read {t.get('read', 0):.1f} s"
+                   + (f" · speakers {t['speakers']:.1f} s" if "speakers" in t else "")
+                   + f" · index {t.get('index', 0):.1f} s · bullets {t.get('notes', 0):.1f} s")
     st.caption(f"Source: {ss.source}")
 
     if ss.media is not None and is_video(ss.media_name):
         st.video(ss.media, start_time=ss.start)
 
-    tab_bul, tab_qa, tab_tx = st.tabs(["📝 Bullet points", "💬 Ask the transcript", "📄 Transcript"])
+    # ---------------- who's who (video only): names read from the meeting video, editable
+    if ss.speakers:
+        named = sum(1 for sp in ss.speakers if sp["name"])
+        with st.expander(f"👥 Speakers · {len(ss.speakers)} voices, {named} named from the video",
+                         expanded=named < len(ss.speakers)):
+            st.caption("Each voice in the recording, with the name shown for it on screen in the meeting "
+                       "video. Fix or fill in names, then rewrite: action items said as \"I'll …\" go to "
+                       "whoever said them.")
+            lines_of: dict = {}
+            for s in segments:
+                lines_of.setdefault(s.speaker_id, []).append(s)
+            with st.form(f"speakers{ss.run_id}"):
+                names = {}
+                for sp in ss.speakers:
+                    c1, c2 = st.columns([2, 5], vertical_alignment="center")
+                    names[sp["label"]] = c1.text_input(sp["label"], value=sp["name"], placeholder="Type a name",
+                                                       key=f"name{ss.run_id}_{sp['label']}")
+                    source = {"screen": "📺 read from the video", "you": "✏️ set by you"}.get(
+                        sp["source"], "❔ not identified: type a name")
+                    example = max(lines_of.get(sp["label"], []), key=lambda s: len(s.text), default=None)
+                    c2.markdown(f"<small>{source} · {sp['lines']} lines</small>"
+                                + (f"<div class='sa-src'>“{ui.html.escape(example.text)}”</div>" if example else ""),
+                                unsafe_allow_html=True)
+                apply = st.form_submit_button("✍️ Apply names and rewrite action items", type="primary",
+                                              disabled=not backend.can_rename)
+            if apply:
+                rename_speakers(names, llm)
+    elif ss.speakers_off and ss.media is not None and is_video(ss.media_name):
+        st.info(f"👥 Speakers weren't identified, so action items may not have owners. {ss.speakers_off}")
+
+    tab_bul, tab_qa, tab_tx = st.tabs(["📝 Bullet points", "💬 Ask SNAP", "📄 Transcript"])
 
     with tab_bul:
         st.markdown(f"<div class='sa-card'><h3>{ui.html.escape(notes['title'])}</h3>"

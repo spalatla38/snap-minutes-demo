@@ -15,6 +15,7 @@ from pathlib import Path
 import pipeline as P
 import rag
 import readers
+import speakers as S
 from progress import Stage, Tracker
 from segments import Segment, fmt_ts
 
@@ -29,6 +30,8 @@ DEFAULT_RATES = {
     "prompt_chars_per_s": 8000.0,                 # how fast the model reads the transcript
     "llm_load": 16.0,                             # seconds to load a model that isn't in memory
     "embed_batch_s": 0.4,
+    "speakers_rtf": 0.16,                         # telling voices apart, per second of audio
+    "speakers_ocr_s": 18.0,                       # reading names on screen
 }
 
 
@@ -44,16 +47,27 @@ def make_tracker(kind: str, size_bytes: int, rates: dict, upload: bool = False) 
         Stage("input", "Transcribing audio" if video else "Reading the input",
               # before Whisper reports the audio length, guess from the file size
               (rates["whisper_load"] + size_bytes / 1e6 * 1.5) if video else 0.4),
+    ]
+    if video and S.available()[0]:
+        stages.append(Stage("speakers", "Identifying speakers", 25.0))
+    stages += [
         Stage("index", "Building the Q&A index", 1.0),
         Stage("notes", "Writing bullet points", 15.0),
     ]
     return Tracker(stages)
 
 
+def speakers_estimate(duration_s: float, rates: dict) -> float:
+    """Measured on the RTX 3060 laptop: telling voices apart ~0.15 s per second of audio
+    (CPU, 4 threads), reading names ~18 s for a 4-person meeting."""
+    return 3.0 + duration_s * rates["speakers_rtf"] + rates["speakers_ocr_s"]
+
+
 def process(job: dict, tracker: Tracker, rates: dict, llm: str, whisper_size: str) -> dict:
     """Run one meeting. job: {"kind": video|file|sample|text, "name", "data" (bytes), "text"}.
     Returns segments, source, index, notes, timings and measured speeds ("stats")."""
     stats: dict = {}
+    speakers = None  # who's who, for video (see identify_speakers)
     t_in = time.perf_counter()
     tracker.begin("input")
     if job["kind"] == "video":
@@ -76,6 +90,10 @@ def process(job: dict, tracker: Tracker, rates: dict, llm: str, whisper_size: st
         source = f"{job['name']} (Whisper on {'GPU' if meta['device'] == 'cuda' else 'CPU'})"
         stats["gpu_error"] = meta.get("gpu_error")
         stats["vad_off"] = meta.get("vad") is False
+        tracker.finish("input")
+        stats["t_input_end"] = time.perf_counter()
+        stats["input_s"] = stats["t_input_end"] - t_in
+        speakers = identify_speakers(job["data"], segments, tracker, rates, stats)
     elif job["kind"] == "file":
         tracker.update("input", 0.3, f"Reading {job['name']}")
         segments, source = readers.read_file(job["name"], job["data"]), job["name"]
@@ -85,9 +103,11 @@ def process(job: dict, tracker: Tracker, rates: dict, llm: str, whisper_size: st
     else:
         tracker.update("input", 0.3, "Reading the pasted text")
         segments, source = readers.read_text(job["text"]), "pasted text"
-    tracker.finish("input")
-    t_idx = stats["t_input_end"] = time.perf_counter()
-    stats["input_s"] = t_idx - t_in
+    if "t_input_end" not in stats:  # text inputs: reading is the whole first step
+        tracker.finish("input")
+        stats["t_input_end"] = time.perf_counter()
+        stats["input_s"] = stats["t_input_end"] - t_in
+    t_idx = time.perf_counter()
 
     # --- Q&A index
     n_passages = len(rag.make_passages(segments))
@@ -130,8 +150,63 @@ def process(job: dict, tracker: Tracker, rates: dict, llm: str, whisper_size: st
         stats["gen_window"] = t_end - t_first
     stats["notes_s"] = t_end - t_notes
     stats["index_s"] = t_notes - t_idx
+    timings = {"read": stats["input_s"], "index": stats["index_s"], "notes": stats["notes_s"]}
+    if "speakers_s" in stats:
+        timings["speakers"] = stats["speakers_s"]
     return {"segments": segments, "source": source, "index": index, "notes": notes, "stats": stats,
-            "timings": {"read": stats["input_s"], "index": stats["index_s"], "notes": stats["notes_s"]}}
+            "speakers": speakers, "timings": timings}
+
+
+def identify_speakers(video: bytes, segments, tracker: Tracker, rates: dict, stats: dict):
+    """Label each transcript line with who said it (speakers.py). Returns the speaker list for
+    the app's Speakers panel, or None when the speaker models aren't installed or it fails;
+    the meeting is still processed, just without names."""
+    ok, why = S.available()
+    if not ok:
+        stats["speakers_off"] = why
+        return None
+    t0 = time.perf_counter()
+    tracker.set_estimate("speakers", speakers_estimate(stats.get("duration") or 60.0, rates))
+    tracker.begin("speakers", "Listening for different voices")
+    try:
+        info = S.identify(video, segments, on_progress=lambda f, d: tracker.update("speakers", f, d))
+    except Exception as e:  # noqa: BLE001  (names are a bonus; never lose the meeting over them)
+        stats["speakers_off"] = f"Speaker identification failed: {e}"[:300]
+        for seg in segments:
+            seg.speaker = seg.speaker_id = None
+        tracker.finish("speakers")
+        return None
+    tracker.finish("speakers")
+    stats["speakers_s"] = time.perf_counter() - t0
+    return info["speakers"]
+
+
+def rewrite(segments, names: dict[str, str], tracker: Tracker, rates: dict, llm: str) -> dict:
+    """After the user corrects speaker names: relabel the lines, then rebuild the Q&A index and
+    the bullet points so owners use the corrected names. Tracker stages: index, notes."""
+    S.apply_names(segments, names)
+    t0 = time.perf_counter()
+    tracker.begin("index", "Updating the Q&A index with the names")
+    index = rag.build_index(segments, on_progress=lambda p: tracker.update("index", p))
+    tracker.finish("index")
+    t1 = time.perf_counter()
+    tok_s = rates["tok_per_s"].get(llm, 60.0)
+    tracker.set_estimate("notes", sum(c / rates["prompt_chars_per_s"] + P.expected_note_tokens(c) / tok_s
+                                      for c in P.note_calls(segments)))
+    tracker.begin("notes", "Rewriting bullet points with the names")
+    started = {}
+
+    def on_notes(frac, info):
+        if info["tokens"] and not started:
+            started["t"] = True
+            tracker.rebase("notes")
+        tracker.update("notes", frac, f"Writing with {llm} · {info['tokens']} tokens" if info["tokens"]
+                       else "Reading the transcript")
+
+    notes = P.extract_notes(segments, model=llm, on_progress=on_notes)
+    tracker.finish("notes")
+    return {"segments": segments, "index": index, "notes": notes,
+            "timings": {"index": t1 - t0, "notes": time.perf_counter() - t1}}
 
 
 def learn_rates(rates: dict, stats: dict, llm: str) -> None:
@@ -140,6 +215,10 @@ def learn_rates(rates: dict, stats: dict, llm: str) -> None:
     if stats.get("duration") and stats.get("t_audio"):
         audio_s = stats["t_input_end"] - stats["t_audio"]
         rates["whisper_rtf"][stats["device"]] = max(0.02, audio_s / stats["duration"])
+    if stats.get("speakers_s") and stats.get("duration"):
+        # attribute the measured time to the voice part, keeping the name-reading estimate
+        voice_s = max(1.0, stats["speakers_s"] - 3.0 - rates["speakers_ocr_s"])
+        rates["speakers_rtf"] = max(0.02, voice_s / stats["duration"])
     if stats.get("gen_window") and notes_tokens and stats["gen_window"] > 0.5:
         rates["tok_per_s"][llm] = max(5.0, notes_tokens / stats["gen_window"])
     if stats.get("loaded") and stats.get("first_token_s", 0) > 0.05:
@@ -149,11 +228,16 @@ def learn_rates(rates: dict, stats: dict, llm: str) -> None:
 # ------------------------------------------------------------------ JSON for the hosted page
 def result_to_json(res: dict) -> dict:
     """Everything the page needs to show results. The Q&A index stays on the PC."""
-    return {"segments": [[s.id, s.start, s.end, s.text] for s in res["segments"]],
+    return {"segments": [[s.id, s.start, s.end, s.text, s.speaker, s.speaker_id] for s in res["segments"]],
             "notes": res["notes"], "source": res["source"], "timings": res["timings"],
-            "notices": {"gpu_error": bool(res["stats"].get("gpu_error")),
-                        "vad_off": bool(res["stats"].get("vad_off"))}}
+            "speakers": res.get("speakers"), "notices": notices(res["stats"])}
+
+
+def notices(stats: dict) -> dict:
+    return {"gpu_error": bool(stats.get("gpu_error")), "vad_off": bool(stats.get("vad_off")),
+            "speakers_off": stats.get("speakers_off") or ""}
 
 
 def segments_from_json(rows: list) -> list[Segment]:
-    return [Segment(int(i), start, end, text) for i, start, end, text in rows]
+    """Rows of [id, start, end, text] or [id, start, end, text, speaker, speaker_id]."""
+    return [Segment(int(r[0]), r[1], r[2], r[3], *(r[4:6])) for r in rows]

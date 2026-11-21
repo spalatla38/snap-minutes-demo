@@ -5,7 +5,7 @@ things, **entirely on your computer**:
 
 1. **Transcript download (optional):** a button that saves the transcript with line numbers and timestamps.
 2. **Main bullet points:** decisions, key points and action items, each linked to the line it came from.
-3. **Ask the transcript:** a question box that answers only from the transcript, cites the lines it
+3. **Ask SNAP:** a question box that answers only from the transcript, cites the lines it
    used, and replies "Not in the transcript." when the answer isn't there.
 
 Nothing is uploaded and nothing is saved: uploads, the transcript and the Q&A index live in memory
@@ -37,6 +37,8 @@ transcript / notes file ──► readers.py ────────┴─► n
 | Part | Choice | Licence |
 |---|---|---|
 | Speech-to-text | Whisper via faster-whisper | MIT |
+| Who spoke when | sherpa-onnx with pyannote segmentation 3.0 + 3D-Speaker ERes2Net | Apache 2.0 / MIT / Apache 2.0 |
+| Names on screen | RapidOCR (PaddleOCR models) | Apache 2.0 |
 | Language model | `qwen3:4b-instruct` (default), `qwen3:1.7b` (low memory), `phi4-mini` | Apache 2.0 / MIT |
 | Embeddings | `all-minilm` (all-MiniLM-L6-v2) | Apache 2.0 |
 | Model runtime | Ollama | MIT |
@@ -85,7 +87,20 @@ This installs the Python packages and downloads the models. After this, **no int
    from speeds measured on the reference laptop, shows "≈" until the current step reports progress,
    and adapts to this laptop after the first run.
 5. Use the three tabs: **Bullet points** (each with a 📍 Source popover; tick off action items),
-   **Ask the transcript** (chat, with suggested questions), and **Transcript** (search and downloads).
+   **Ask SNAP** (chat, with suggested questions), and **Transcript** (search and downloads).
+
+### Who owns each action item (video)
+"I'll send it Monday" only has an owner if we know who said it. For a meeting video, SNAP Assist:
+1. **Tells voices apart** (speaker diarization), so every transcript line gets "Speaker 1", "Speaker 2"…
+2. **Reads the names on screen** in Teams/Zoom/Meet recordings: frames are read while each voice is
+   talking, and the name that shows on the big tile only while that voice talks is its name. Small
+   tiles (always visible) and meeting UI text are ignored; OCR misspellings are folded together.
+3. **Writes the action items** with every line labelled `Name: …`, so "I'll…", "Will do" and
+   "Can you…? / Yes" go to the right person.
+
+The **👥 Speakers** panel shows each voice, where its name came from, and a sample line. Fix or fill in
+a name and click **Apply names and rewrite action items**. On a 2-minute, 4-person meeting this step
+takes about 35 s (CPU) and names every speaker; the progress bar shows it as "Identifying speakers".
 
 ### Share with people on the same network (Windows)
 ```powershell
@@ -145,6 +160,7 @@ python pipeline.py my_meeting.mp4 --whisper base --llm qwen3:1.7b
 ```bash
 python tests/test_pipeline.py
 python tests/test_server.py      # the PC service and the hosted page's client, over real HTTP
+python tests/test_speakers.py    # speaker naming logic and how names reach the action items
 ```
 The tests fake Ollama and Whisper, so they run anywhere without models.
 
@@ -175,8 +191,11 @@ The tests fake Ollama and Whisper, so they run anywhere without models.
 
 ## Known limitations (Phase 0)
 
-- **No speaker labels from video:** Whisper doesn't record who spoke. Transcript files that include
-  speaker names (`.vtt` with `<v Name>`, or `Name: text`) keep them.
+- **Speaker names need names on screen:** for video, voices are told apart in any recording, but
+  names are read from Teams/Zoom/Meet name labels, which works best in **speaker view** (the person
+  talking gets the big tile). In gallery view, or in a camera recording of a room, voices show as
+  "Speaker 1, 2…" to name in the 👥 Speakers panel. Transcript files without speaker names leave
+  "I'll …" commitments **Unassigned** rather than guessing.
 - **Small models:** answers and bullets can miss things. Every item links to its source lines, and
   unlinked items are flagged, so review before sharing.
 - **Q&A is one question at a time:** follow-up questions don't yet use earlier answers.

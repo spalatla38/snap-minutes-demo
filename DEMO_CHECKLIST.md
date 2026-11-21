@@ -34,7 +34,7 @@
 | 0:20 | Sai | Turn on airplane mode and click the offline check | "No internet. Everything you see runs on this laptop." |
 | 0:35 | Aarya | Upload the video and click **Process meeting** | "Whisper turns speech into text right here. Watch the CPU." |
 | 1:30 | Niharika | Show **Bullet points**; click a timestamp so the video jumps | "Each point links to the exact moment it came from." |
-| 2:00 | Niharika | **Ask the transcript**: "Who is building the progress bar?" then "What is the budget?" | "It answers with its sources, and says when the answer isn't there." |
+| 2:00 | Niharika | **Ask SNAP**: "Who is building the progress bar?" then "What is the budget?" | "It answers with its sources, and says when the answer isn't there." |
 | 2:45 | Aarya | **Transcript** tab: click **Download** | "The transcript is optional and stays on your machine." |
 | 3:00 | Sai | Show the privacy receipt and the terminal | "Zero external connections. Nothing left this laptop." |
 | 3:20 | Precious | Close | "Private you can prove, and built for follow-through." |

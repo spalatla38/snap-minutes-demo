@@ -1,4 +1,4 @@
-"""Ask the transcript: retrieval-augmented answers, entirely on this computer.
+"""Ask SNAP: retrieval-augmented answers, entirely on this computer.
 
 1. Split the numbered transcript into small overlapping passages.
 2. Embed them with a local model (all-MiniLM via Ollama) into a NumPy matrix in RAM.

@@ -27,16 +27,15 @@ class Busy(Exception):
 
 # ------------------------------------------------------------------ local
 class LocalRun:
-    def __init__(self, job: dict, llm: str, whisper: str, rates: dict, lock: threading.Lock):
-        import jobs as J
-        self._J = J
-        self.tracker = J.make_tracker(job["kind"], len(job.get("data") or b""), rates)
+    """Runs `work(tracker)` on a background thread; poll() reports progress, then the result."""
+
+    def __init__(self, work, tracker, finish, lock: threading.Lock):
+        self.tracker, self._finish = tracker, finish
         self._out: dict = {}
-        self._rates, self._llm = rates, llm
 
         def target():
             try:
-                self._out["res"] = J.process(job, self.tracker, rates, llm, whisper)
+                self._out["res"] = work(tracker)
             except Exception as e:  # noqa: BLE001  (shown on the page)
                 self._out["error"] = str(e)
             finally:
@@ -53,13 +52,7 @@ class LocalRun:
             return {"state": "running", "snapshot": snap}
         if "error" in self._out:
             return {"state": "error", "snapshot": snap, "error": self._out["error"]}
-        res = self._out["res"]
-        self._J.learn_rates(self._rates, res["stats"], self._llm)
-        return {"state": "done", "snapshot": self.tracker.snapshot(), "result": {
-            "segments": res["segments"], "notes": res["notes"], "source": res["source"],
-            "timings": res["timings"], "ref": res["index"],
-            "notices": {"gpu_error": bool(res["stats"].get("gpu_error")),
-                        "vad_off": bool(res["stats"].get("vad_off"))}}}
+        return {"state": "done", "snapshot": self.tracker.snapshot(), "result": self._finish(self._out["res"])}
 
 
 class LocalBackend:
@@ -79,14 +72,41 @@ class LocalBackend:
     def warm_up(self, llm: str) -> None:
         P.warm_up(llm)
 
-    def start(self, job: dict, llm: str, whisper: str, rates: dict) -> LocalRun:
+    can_rename = True
+
+    def _run(self, work, tracker, finish) -> LocalRun:
         if not self._lock.acquire(blocking=False):
             raise Busy()
         try:
-            return LocalRun(job, llm, whisper, rates, self._lock)
+            return LocalRun(work, tracker, finish, self._lock)
         except Exception:
             self._lock.release()
             raise
+
+    def start(self, job: dict, llm: str, whisper: str, rates: dict) -> LocalRun:
+        import jobs as J
+        tracker = J.make_tracker(job["kind"], len(job.get("data") or b""), rates)
+
+        def finish(res):
+            J.learn_rates(rates, res["stats"], llm)
+            return {"segments": res["segments"], "notes": res["notes"], "source": res["source"],
+                    "timings": res["timings"], "ref": res["index"], "speakers": res["speakers"],
+                    "notices": J.notices(res["stats"])}
+
+        return self._run(lambda tr: J.process(job, tr, rates, llm, whisper), tracker, finish)
+
+    def rename(self, segments, names: dict, llm: str, rates: dict) -> LocalRun:
+        """Apply corrected speaker names, then rebuild the index and bullet points."""
+        import jobs as J
+        from progress import Stage, Tracker
+        tracker = Tracker([Stage("index", "Updating the Q&A index", 1.0),
+                           Stage("notes", "Rewriting bullet points", 12.0)])
+
+        def finish(res):
+            return {"segments": res["segments"], "notes": res["notes"], "ref": res["index"],
+                    "timings": res["timings"]}
+
+        return self._run(lambda tr: J.rewrite(segments, names, tr, rates, llm), tracker, finish)
 
     def ask(self, ref, segments: list[Segment], question: str, llm: str) -> dict:
         import rag
@@ -106,6 +126,7 @@ class RemoteError(Exception):
 
 class RemoteBackend:
     remote = True
+    can_rename = False  # renaming speakers is only built for the local app
 
     def __init__(self, url: str, token: str):
         self.url = url.rstrip("/")
@@ -191,6 +212,7 @@ class RemoteRun:
         out = b._call("GET", f"/jobs/{self.job_id}").json()
         if out["state"] == "done":
             res = out["result"]
-            res["segments"] = [Segment(int(i), s, e, t) for i, s, e, t in res["segments"]]
+            # rows: [id, start, end, text] or [id, start, end, text, speaker, speaker_id]
+            res["segments"] = [Segment(int(r[0]), r[1], r[2], r[3], *r[4:6]) for r in res["segments"]]
             res["ref"] = self.job_id
         return out
