@@ -1,0 +1,4 @@
+# Hosted page only (Streamlit Cloud). No models here: processing runs on the host PC.
+streamlit>=1.50
+requests>=2.31
+numpy>=1.26

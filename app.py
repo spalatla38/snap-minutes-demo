@@ -1,18 +1,20 @@
-"""SNAP Assist app. Run with:  streamlit run app.py
+"""SNAP Assist app. Run with:  streamlit run app.py   (or run_demo.ps1 / run_lan.ps1)
 
 Input: a meeting video/audio file, or a transcript/notes file (or pasted text).
 Output: 1) optional transcript download, 2) main bullet points, 3) Q&A over the transcript.
-Everything runs on this computer, and nothing is written to disk: uploads, the
-transcript and the Q&A index live in memory for this session only.
 
-While a meeting is processed, the work runs in a background thread and the page redraws
-an animated panel about five times a second with % done, time remaining and elapsed time
-(see progress.py for how the ETA is worked out). The worker never touches Streamlit;
-it only reports progress to the Tracker, which the page reads."""
+Three ways to run the same page (see backend.py):
+- local   (run_demo.ps1)  everything on this computer, 127.0.0.1 only. Works in airplane mode.
+- lan     (run_lan.ps1)   same, shared with the local network behind an access code.
+- hosted  (Streamlit Cloud) the page runs in the cloud; the processing runs on the host PC
+          (server.py) reached through an HTTPS tunnel. Selected by the SNAP_BACKEND_URL secret.
+Nothing is written to disk in any mode: uploads, transcripts and Q&A indexes live in memory.
+
+While a meeting is processed the page redraws an animated panel with % done, time remaining
+and elapsed time (see progress.py for how the ETA is worked out)."""
 from __future__ import annotations
 
 import hmac
-import io
 import os
 import socket
 import threading
@@ -22,50 +24,60 @@ from pathlib import Path
 import streamlit as st
 
 import pipeline as P
-import rag
 import readers
 import ui
-from progress import Stage, Tracker, fmt_duration
+from backend import Busy, LocalBackend, RemoteBackend, RemoteError
+from jobs import new_rates
+from progress import fmt_duration
 from segments import fmt_ts, has_times, transcript_md, transcript_txt
 
-SAMPLE = Path(__file__).parent / "sample" / "sample_transcript.json"
 VIDEO_EXT = sorted(e.lstrip(".") for e in P.VIDEO_TYPES)
 TEXT_EXT = sorted(e.lstrip(".") for e in readers.TEXT_TYPES)
 SUGGESTED = ["What was decided?", "What are the action items, and who owns them?",
              "What deadlines were mentioned?", "What risks or open issues came up?"]
 
-# Starting speeds for the ETA, measured on the reference laptop (RTX 3060). After each run
-# the app replaces them with what it measured, so later estimates fit this machine.
-DEFAULT_RATES = {
-    "whisper_rtf": {"cuda": 0.10, "cpu": 0.45},   # seconds of work per second of audio
-    "whisper_load": 4.0,                          # seconds to load Whisper
-    "tok_per_s": {"qwen3:4b-instruct": 80.0, "qwen3:1.7b": 140.0, "phi4-mini": 45.0},
-    "prompt_chars_per_s": 8000.0,                 # how fast the model reads the transcript
-    "llm_load": 16.0,                             # seconds to load a model that isn't in memory
-    "embed_batch_s": 0.4,
-}
 
-st.set_page_config(page_title="SNAP Assist · on-device", page_icon="⚡", layout="wide")
+def _setting(name: str) -> str:
+    """Environment variable first (local runs), then Streamlit secrets (the hosted page)."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        return str(st.secrets.get(name, "") or "")
+    except Exception:  # no secrets file at all: a normal local run
+        return ""
+
+
+BACKEND_URL = _setting("SNAP_BACKEND_URL")
+MODE = "hosted" if BACKEND_URL else ("lan" if os.environ.get("SNAP_LAN") == "1" else "local")
+ACCESS_CODE = _setting("SNAP_ACCESS_CODE")
+SERVER_PORT = int(st.get_option("server.port") or 8501)
+HOST = socket.gethostname()
+
+st.set_page_config(page_title="SNAP Assist", page_icon="⚡", layout="wide")
 st.markdown(ui.CSS, unsafe_allow_html=True)
 ss = st.session_state
 for key, default in {"start": 0, "media": None, "media_name": None, "segments": None, "notes": None,
-                     "index": None, "qa": [], "timings": {}, "receipt": None, "source": None,
+                     "ref": None, "qa": [], "timings": {}, "receipt": None, "source": None,
                      "pending_q": None, "rates": None, "run_id": 0}.items():
     ss.setdefault(key, default)
 if ss.rates is None:
-    ss.rates = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_RATES.items()}
+    ss.rates = new_rates()
 
-# ------------------------------------------------------------------ sharing on the local network
-# run_lan.ps1 sets SNAP_LAN=1 and SNAP_ACCESS_CODE, and serves the app to the local network.
-# The default (run_demo.ps1) listens on 127.0.0.1 only and needs no code.
-LAN_MODE = os.environ.get("SNAP_LAN") == "1"
-ACCESS_CODE = os.environ.get("SNAP_ACCESS_CODE", "")
-SERVER_PORT = int(st.get_option("server.port") or 8501)
+if MODE == "local" and (st.get_option("server.address") or "") not in ("127.0.0.1", "localhost", "::1"):
+    st.warning("This copy may be reachable from other devices on your network. For the private, "
+               "this-computer-only demo, start it with run_demo.ps1 (or add --server.address 127.0.0.1).")
 
+# ------------------------------------------------------------------ access code
+if MODE == "hosted" and not ACCESS_CODE:
+    st.markdown(ui.hero(MODE), unsafe_allow_html=True)
+    st.error("This hosted copy has no access code configured, so it is locked. "
+             "Add SNAP_ACCESS_CODE to the app's secrets.")
+    st.stop()
 if ACCESS_CODE and not ss.get("authed"):
-    st.markdown(ui.hero(), unsafe_allow_html=True)
-    st.info(f"SNAP Assist is shared from **{socket.gethostname()}** on this network. "
-            "Ask the host for the access code.")
+    st.markdown(ui.hero(MODE), unsafe_allow_html=True)
+    st.info("SNAP Assist is available to invited people. Enter the access code you were given."
+            if MODE == "hosted" else f"SNAP Assist is shared from **{HOST}** on this network. "
+                                     "Ask the host for the access code.")
     with st.form("gate"):
         code = st.text_input("Access code", type="password")
         if st.form_submit_button("Enter", type="primary"):
@@ -77,19 +89,32 @@ if ACCESS_CODE and not ss.get("authed"):
     st.stop()
 
 
+# ------------------------------------------------------------------ backend
 @st.cache_resource
 def gpu_lock() -> threading.Lock:
-    """One lock for the whole server (shared by every browser session): only one meeting is
-    processed at a time, so two people never compete for the GPU and its memory."""
+    """One lock for the whole Streamlit server (every browser session): one meeting at a time."""
     return threading.Lock()
 
 
-def privacy_receipt() -> dict:
-    return P.external_connections(serving_port=SERVER_PORT if LAN_MODE else None)
+@st.cache_resource
+def remote_backend(url: str, token: str) -> RemoteBackend:
+    return RemoteBackend(url, token)
+
+
+backend = (remote_backend(BACKEND_URL, _setting("SNAP_SERVER_TOKEN")) if MODE == "hosted"
+           else LocalBackend(gpu_lock(), serving_port=SERVER_PORT if MODE == "lan" else None))
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def backend_status(llm: str, mode: str) -> dict:
+    """Cached briefly: every click reruns the page, and in hosted mode this crosses the tunnel."""
+    return backend.status(llm)
 
 
 def reset(media=None, media_name=None):
-    ss.update(media=media, media_name=media_name, segments=None, notes=None, index=None,
+    if ss.get("ref") is not None:
+        backend.end(ss.ref)  # hosted: frees this session's slot on the PC right away
+    ss.update(media=media, media_name=media_name, segments=None, notes=None, ref=None,
               qa=[], timings={}, receipt=None, start=0, source=None, pending_q=None)
 
 
@@ -118,153 +143,57 @@ def source_controls(item_start, ids, key):
                   help="Jump the video to this moment")
 
 
-# ------------------------------------------------------------------ processing (worker thread)
-def process(job: dict, tracker: Tracker, rates: dict, llm: str, whisper_size: str) -> dict:
-    """Runs off the Streamlit thread: read or transcribe, build the index, write the bullets.
-    Reports progress to `tracker` and returns results plus measured speeds."""
-    stats: dict = {}
-    t_in = time.perf_counter()
-    tracker.begin("input")
-    if job["kind"] == "video":
-        tracker.update("input", 0.0, "Loading Whisper on this device")
-
-        def on_info(info):  # once per attempt: the audio length is now known
-            dev = info["device"]
-            stats.update(duration=info["duration"], device=dev, t_audio=time.perf_counter())
-            tracker.restart("input", f"Whisper on {'GPU' if dev == 'cuda' else 'CPU'} · "
-                                     f"{fmt_ts(info['duration'])} of audio")
-            tracker.set_estimate("input", info["duration"] * rates["whisper_rtf"][dev])
-
-        def on_progress(p):
-            if stats.get("duration"):
-                tracker.update("input", p, f"Whisper on {'GPU' if stats['device'] == 'cuda' else 'CPU'} · "
-                                           f"{fmt_ts(p * stats['duration'])} of {fmt_ts(stats['duration'])}")
-
-        segments, meta = P.transcribe(io.BytesIO(job["data"]), model_size=whisper_size,
-                                      on_progress=on_progress, on_info=on_info)
-        source = f"{job['name']} (Whisper on {'GPU' if meta['device'] == 'cuda' else 'CPU'})"
-        stats["gpu_error"] = meta.get("gpu_error")
-        stats["vad_off"] = meta.get("vad") is False
-    elif job["kind"] == "file":
-        tracker.update("input", 0.3, f"Reading {job['name']}")
-        segments, source = readers.read_file(job["name"], job["data"]), job["name"]
-    elif job["kind"] == "sample":
-        tracker.update("input", 0.3, "Reading the sample transcript")
-        segments, source = readers.read_file(SAMPLE.name, SAMPLE.read_bytes()), "sample transcript"
-    else:
-        tracker.update("input", 0.3, "Reading the pasted text")
-        segments, source = readers.read_text(job["text"]), "pasted text"
-    tracker.finish("input")
-    t_idx = stats["t_input_end"] = time.perf_counter()
-    stats["input_s"] = t_idx - t_in
-
-    # --- Q&A index
-    n_passages = len(rag.make_passages(segments))
-    batches = -(-n_passages // 64)
-    tracker.set_estimate("index", 0.3 + batches * rates["embed_batch_s"]
-                         + (0 if P.model_loaded(rag.EMBED_MODEL) else 2.0))
-    tracker.begin("index", f"Embedding {n_passages} passages in memory")
-    index = rag.build_index(segments, on_progress=lambda p: tracker.update("index", p))
-    tracker.finish("index")
-    t_notes = time.perf_counter()
-
-    # --- bullet points
-    sizes = P.note_calls(segments)
-    loaded = P.model_loaded(llm)
-    tok_s = rates["tok_per_s"].get(llm, 60.0)
-    tracker.set_estimate("notes", (0 if loaded else rates["llm_load"])
-                         + sum(c / rates["prompt_chars_per_s"] + P.expected_note_tokens(c) / tok_s for c in sizes))
-    tracker.begin("notes", "Reading the transcript" if loaded else f"Loading {llm} into memory")
-    first = {}
-
-    def on_notes(frac, info):
-        part = f" (part {info['call']} of {info['calls']})" if info["calls"] > 1 else ""
-        if info["tokens"] == 0:
-            tracker.update("notes", frac, f"Reading the transcript{part}")
-        elif info["tokens"]:
-            if info["call"] not in first:  # writing has started: measure speed from here
-                first[info["call"]] = (time.perf_counter(), info["tokens"])
-                tracker.rebase("notes")
-            stats["tokens_last_call"] = info["tokens"]
-            tracker.update("notes", frac, f"Writing with {llm} · {info['tokens']} tokens{part}")
-
-    notes = P.extract_notes(segments, model=llm, on_progress=on_notes)
-    tracker.finish("notes")
-    t_end = time.perf_counter()
-    if first:  # measured generation speed for the last call, for future estimates
-        t_first, _ = first[max(first)]
-        stats["first_token_s"] = min(t for t, _ in first.values()) - t_notes
-        stats["loaded"] = loaded
-        stats["prompt_chars"] = sizes[0]
-        stats["gen_window"] = t_end - t_first
-    stats["notes_s"] = t_end - t_notes
-    stats["index_s"] = t_notes - t_idx
-    return {"segments": segments, "source": source, "index": index, "notes": notes, "stats": stats,
-            "timings": {"read": stats["input_s"], "index": stats["index_s"], "notes": stats["notes_s"]}}
-
-
-def learn_rates(rates: dict, stats: dict, llm: str) -> None:
-    """Fold this run's measured speeds into the estimates for the next run (kept in memory only)."""
-    notes_tokens = stats.get("tokens_last_call")
-    if stats.get("duration") and stats.get("t_audio"):
-        audio_s = stats["t_input_end"] - stats["t_audio"]
-        rates["whisper_rtf"][stats["device"]] = max(0.02, audio_s / stats["duration"])
-    if stats.get("gen_window") and notes_tokens and stats["gen_window"] > 0.5:
-        rates["tok_per_s"][llm] = max(5.0, notes_tokens / stats["gen_window"])
-    if stats.get("loaded") and stats.get("first_token_s", 0) > 0.05:
-        rates["prompt_chars_per_s"] = max(500.0, stats["prompt_chars"] / stats["first_token_s"])
-
-
 def run_with_progress(job: dict, llm: str, whisper_size: str) -> None:
     video = job["kind"] == "video"
-    tracker = Tracker([
-        Stage("input", "Transcribing audio" if video else "Reading the input",
-              # before Whisper reports the audio length, guess from the file size
-              (ss.rates["whisper_load"] + len(job.get("data") or b"") / 1e6 * 1.5) if video else 0.4),
-        Stage("index", "Building the Q&A index", 1.0),
-        Stage("notes", "Writing bullet points", 15.0),
-    ])
-    out: dict = {}
-    lock = gpu_lock()
-    if not lock.acquire(blocking=False):
-        st.warning("⏳ Someone else is processing a meeting on this PC right now. "
-                   "Please try again in a minute.")
+    try:
+        run = backend.start(job, llm, whisper_size, ss.rates)
+    except Busy:
+        st.warning("⏳ The SNAP Assist PC is already serving the most people it allows at once. "
+                   "Please try again in a few minutes." if backend.remote else
+                   "⏳ Someone else is processing a meeting on this PC right now. Please try again in a minute.")
+        return
+    except RemoteError as e:
+        st.error(str(e))
         return
 
-    def target():
-        try:
-            out["result"] = process(job, tracker, ss_rates, llm, whisper_size)
-        except Exception as e:  # noqa: BLE001  (shown to the user below)
-            out["error"] = e
-        finally:
-            # Released by the worker, not the page: if the person closes the tab mid-run,
-            # the work still finishes before the next person can start.
-            lock.release()
-
-    ss_rates = ss.rates  # the worker gets a plain dict, never session_state itself
     panel = st.empty()
-    worker = threading.Thread(target=target, daemon=True)
-    worker.start()
-    while worker.is_alive():
-        panel.markdown(ui.progress_panel(tracker.snapshot(), video), unsafe_allow_html=True)
-        time.sleep(0.2)
-    worker.join()
+    failures = 0
+    while True:
+        try:
+            out = run.poll()
+            failures = 0
+        except RemoteError as e:
+            failures += 1  # a dropped request over the internet: retry a few times
+            if failures >= 4:
+                panel.empty()
+                st.error(f"Lost the connection to the SNAP Assist PC: {e}")
+                return
+            time.sleep(1.5)
+            continue
+        snap = out["snapshot"]
+        if out["state"] == "queued":
+            n = out.get("position", 0)
+            snap = {**snap, "label": "Waiting for the PC",
+                    "detail": f"{n} meeting{'s' if n != 1 else ''} ahead of you" if n else "You're next"}
+        panel.markdown(ui.progress_panel(snap, video), unsafe_allow_html=True)
+        if out["state"] in ("done", "error"):
+            break
+        if out["state"] != "uploading":  # uploads move as fast as the pieces go
+            time.sleep(0.5 if backend.remote else 0.2)
 
-    if "error" in out:
+    if out["state"] == "error":
         panel.empty()
-        st.error(f"Something went wrong: {out['error']}")
+        st.error(f"Something went wrong: {out.get('error')}")
         return
-    panel.markdown(ui.progress_panel(tracker.snapshot(), video), unsafe_allow_html=True)
     res = out["result"]
-    learn_rates(ss.rates, res["stats"], llm)
-    if res["stats"].get("vad_off"):
-        st.toast("Silence filter (VAD) unavailable: onnxruntime did not load, so the whole audio was transcribed. "
-                 "Run: pip install onnxruntime==1.20.1")
-    if res["stats"].get("gpu_error"):
+    if res["notices"].get("vad_off"):
+        st.toast("Silence filter (VAD) unavailable: onnxruntime did not load, so the whole audio "
+                 "was transcribed. Run: pip install onnxruntime==1.20.1")
+    if res["notices"].get("gpu_error"):
         st.toast("GPU transcription wasn't available, so the CPU was used. See README: GPU setup.")
     time.sleep(0.9)  # let the finished state (green check, 100%) show for a moment
-    ss.update(segments=res["segments"], index=res["index"], notes=res["notes"], qa=[], start=0,
-              source=res["source"], timings=res["timings"], receipt=privacy_receipt(),
+    ss.update(segments=res["segments"], ref=res["ref"], notes=res["notes"], qa=[], start=0,
+              source=res["source"], timings=res["timings"], receipt=backend.receipt(),
               pending_q=None, run_id=ss.run_id + 1)
     st.rerun()
 
@@ -276,28 +205,43 @@ with st.sidebar:
                        help="qwen3:4b-instruct is the default. qwen3:1.7b uses less memory.")
     whisper_size = st.selectbox("Speech-to-text for video (Whisper)", ["base", "small"], index=1,
                                 help="'base' is fastest; 'small' is the best balance.")
-    ok_llm, msg_llm = P.check_ollama(llm)
-    ok_emb, msg_emb = P.check_ollama(rag.EMBED_MODEL)
-    (st.success if ok_llm else st.error)(msg_llm)
-    st.caption("Transcription: " + ("NVIDIA GPU available" if P.cuda_available() else "CPU (no usable NVIDIA GPU found)"))
-    if not ok_emb:
-        st.error(msg_emb)
-    ready = ok_llm and ok_emb
-    if ok_llm:
-        warm = P.model_loaded(llm)
+    stat = backend_status(llm, MODE)
+    if stat.get("unreachable"):
+        st.error(stat["msg_llm"])
+        if st.button("↻ Check again"):
+            backend_status.clear()
+            st.rerun()
+    else:
+        (st.success if stat["ok_llm"] else st.error)(
+            ("Host PC connected · " if MODE == "hosted" else "") + stat["msg_llm"])
+        st.caption("Transcription: " + ("NVIDIA GPU available" if stat["cuda"] else "CPU (no usable NVIDIA GPU found)"))
+        if not stat["ok_emb"]:
+            st.error(stat["msg_emb"])
+        if MODE == "hosted":
+            st.caption(f"People using the PC: {stat.get('sessions', 0)} of {stat.get('max_sessions', 2)}"
+                       + (" · processing a meeting now" if stat.get("processing") else ""))
+    ready = bool(stat["ok_llm"] and stat["ok_emb"])
+    if stat["ok_llm"]:
+        warm = stat["loaded"]
         st.caption("Model status: " + ("🟢 loaded in memory" if warm else "⚪ not loaded yet (first run adds ~15 s)"))
         if st.button("Warm up model", help="Loads the model into memory before you present.", disabled=warm):
             with st.spinner("Loading model..."):
-                P.warm_up(llm)
+                backend.warm_up(llm)
+            backend_status.clear()
             st.toast("Model is loaded and ready.")
             st.rerun()
 
     st.divider()
     st.header("🔒 Privacy")
-    if LAN_MODE:
-        st.caption(f"All processing happens on **{socket.gethostname()}**, the PC hosting this app on "
+    if MODE == "hosted":
+        st.caption("This page is hosted on Streamlit Community Cloud. Your file travels **encrypted** from "
+                   "your browser through Streamlit Cloud and an ngrok tunnel to the **host PC**, where "
+                   "open-source models process it. No cloud AI service sees it. **Nothing is saved**: the PC "
+                   "forgets the meeting when you start another one or after 30 minutes without use.")
+    elif MODE == "lan":
+        st.caption(f"All processing happens on **{HOST}**, the PC hosting this app on "
                    "your local network. Files you upload go only to that PC and are not saved.")
-        if gpu_lock().locked():
+        if stat.get("processing"):
             st.warning("⏳ A meeting is being processed right now.")
     else:
         st.caption("All processing happens on this computer. Nothing is saved after you close the app.")
@@ -310,7 +254,8 @@ with st.sidebar:
     if ss.receipt:
         r = ss.receipt
         n = len(r["external"])
-        (st.success if n == 0 else st.error)(f"Privacy receipt: {n} external connections")
+        where = "the host PC's models" if MODE == "hosted" else "this app and its models"
+        (st.success if n == 0 else st.error)(f"Privacy receipt: {n} external connections from {where}")
         if r.get("viewers"):
             st.caption(f"Plus {len(r['viewers'])} browser connection(s) from the local network "
                        "(people using this app). These stay inside your network.")
@@ -319,9 +264,9 @@ with st.sidebar:
             st.caption(line)
 
 # ------------------------------------------------------------------ input
-st.markdown(ui.hero(), unsafe_allow_html=True)
-if LAN_MODE:
-    st.caption(f"🖧 Shared from **{socket.gethostname()}** on your local network · one meeting is processed at a time")
+st.markdown(ui.hero(MODE), unsafe_allow_html=True)
+if MODE == "lan":
+    st.caption(f"🖧 Shared from **{HOST}** on your local network · one meeting is processed at a time")
 
 tab_file, tab_paste = st.tabs(["📁 Upload a file", "📋 Paste text"])
 pasted = None
@@ -344,15 +289,20 @@ run = c1.button("▶ Process meeting", type="primary", width="stretch", disabled
 sample = c2.button("✨ Use sample transcript", width="stretch", disabled=not ready,
                    help="A made-up 2-minute meeting, for rehearsing.")
 if not ready:
-    st.info("Start Ollama and download the models (see the sidebar) to enable processing.")
+    st.info("The host PC isn't reachable right now. Try again shortly." if MODE == "hosted" else
+            "Start Ollama and download the models (see the sidebar) to enable processing.")
 
 if run or sample:
     if sample:
         reset()
         job = {"kind": "sample"}
     elif ss.media is not None and is_video(ss.media_name):
+        backend.end(ss.ref)
+        ss.ref = None
         job = {"kind": "video", "name": ss.media_name, "data": ss.media}
     elif ss.media is not None:
+        backend.end(ss.ref)
+        ss.ref = None
         job = {"kind": "file", "name": ss.media_name, "data": ss.media}
     else:
         reset()
@@ -440,12 +390,16 @@ if ss.segments:
                 st.markdown(question)
             with st.chat_message("assistant", avatar="⚡"):
                 thinking = st.empty()
-                thinking.markdown(ui.typing(), unsafe_allow_html=True)
+                thinking.markdown(ui.typing("Searching the transcript on the host PC" if MODE == "hosted"
+                                            else "Searching the transcript on this device"),
+                                  unsafe_allow_html=True)
                 try:
-                    res = rag.answer(question, ss.index, segments, model=llm)
+                    res = backend.ask(ss.ref, segments, question, llm)
                     ss.qa.append({"q": question, **res})
-                    ss.receipt = privacy_receipt()
+                    ss.receipt = backend.receipt()
                     st.rerun()
+                except RemoteError as e:
+                    thinking.error(f"{e} If the session ended (30 minutes without use), process the meeting again.")
                 except Exception as e:  # noqa: BLE001
                     thinking.error(f"Something went wrong: {e}")
         if ss.qa:

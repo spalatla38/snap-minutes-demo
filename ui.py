@@ -161,12 +161,21 @@ _WAVE = "".join(f'<span style="animation-delay:-{(i * 0.37) % 1.1:.2f}s;height:{
                 for i in range(30))
 
 
-def hero() -> str:
+# The badges must stay true in each mode: the hosted page does not run on "this computer"
+# and does not work offline, so it says what actually happens instead.
+BADGES = {
+    "local": ["Runs on this computer", "Works offline", "Nothing is saved", "Open-source models"],
+    "lan": ["Runs on the host PC", "Stays on your network", "Nothing is saved", "Open-source models"],
+    "hosted": ["Processed on the host PC, not cloud AI", "Encrypted in transit", "Nothing is saved",
+               "Open-source models"],
+}
+
+
+def hero(mode: str = "local") -> str:
+    badges = "".join(f"<span class='sa-badge'>{html.escape(b)}</span>" for b in BADGES[mode])
     return ("<div class='sa-hero'><h1>⚡ SNAP Assist</h1>"
             "<p>Meeting video, transcript or notes in. Transcript, bullet points and answers out.</p>"
-            "<div class='sa-badges'><span class='sa-badge'>Runs on this computer</span>"
-            "<span class='sa-badge'>Works offline</span><span class='sa-badge'>Nothing is saved</span>"
-            "<span class='sa-badge'>Open-source models</span></div></div>")
+            f"<div class='sa-badges'>{badges}</div></div>")
 
 
 def progress_panel(snap: dict, video: bool) -> str:

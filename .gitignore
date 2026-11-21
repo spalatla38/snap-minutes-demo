@@ -2,3 +2,6 @@
 data/
 __pycache__/
 *.pyc
+.snap_server_token
+.snap_ngrok_domain
+.streamlit/secrets.toml

@@ -1,8 +1,11 @@
-# Keep the demo fully local.
+# Shared by every way of running the app, including the hosted copy on Streamlit Cloud.
+# Which network address the app listens on is set by the launch scripts, not here:
+#   run_demo.ps1 / run_demo.sh  -> 127.0.0.1 (this computer only; the app warns if started otherwise)
+#   run_lan.ps1                 -> 0.0.0.0   (the local network, behind an access code)
+#   Streamlit Cloud             -> chosen by Streamlit; a fixed address here would break it
 [browser]
 gatherUsageStats = false     # turn off Streamlit's anonymous usage statistics
 
 [server]
-address = "127.0.0.1"        # only reachable from this laptop, not the network
 headless = true
 maxUploadSize = 500          # MB

@@ -100,6 +100,40 @@ The models still run only on this PC; others open the printed `http://<this-PC's
   device-to-device traffic; use the office network or a phone hotspot instead.
 - Airplane mode turns off the local network too, so use `run_demo.ps1` for the fully offline demo.
 
+### Hosted on Streamlit Cloud, processed on this PC
+Anyone with the link and access code can use SNAP Assist from any device. The page runs on
+Streamlit Community Cloud, and the processing runs on this PC:
+
+```
+browser (any device) ─HTTPS─► Streamlit Cloud (page only) ─HTTPS─► ngrok tunnel ─► server.py on this PC ─► Whisper / Ollama
+```
+- **What travels where:** uploads go encrypted through Streamlit Cloud and ngrok to this PC, and
+  are processed only here by the open-source models. Nothing is saved: the PC forgets a meeting
+  when its user starts another one or after 30 idle minutes. The hosted page says so; for
+  confidential meetings use `run_demo.ps1` (fully offline).
+- **Limits:** 2 people at a time (`SNAP_MAX_SESSIONS`); one meeting is processed at a time and the
+  next waits in line. Uploads up to 500 MB, sent in 32 MB pieces.
+- **Security:** visitors need the access code; the PC service only accepts requests carrying the
+  server token, and listens only on 127.0.0.1 (the tunnel is its only way in).
+
+**One-time setup**
+1. Create a free account at ngrok.com. In the ngrok dashboard, copy your **authtoken**, and under
+   **Domains** claim your free **static domain** (like `something.ngrok-free.app`).
+2. In a terminal: `ngrok config add-authtoken <your authtoken>`
+3. Start the PC side: `powershell -ExecutionPolicy Bypass -File run_server.ps1`. It asks for the
+   static domain once, creates the server token in `.snap_server_token`, and starts the tunnel.
+4. At share.streamlit.io, sign in with GitHub and click **Create app**: this repository, the branch
+   you want, and main file path **`cloud/streamlit_app.py`**. Under **Advanced settings → Secrets**:
+   ```toml
+   SNAP_BACKEND_URL = "https://something.ngrok-free.app"
+   SNAP_SERVER_TOKEN = "contents of .snap_server_token"
+   SNAP_ACCESS_CODE = "a code you give to the people allowed to use it"
+   ```
+5. Deploy, open the app's link, and enter the access code.
+
+**Every day:** keep this PC on and awake, with Ollama running and `run_server.ps1` started. When the
+PC is off, the hosted page says it can't reach the PC.
+
 ### Command line
 ```bash
 python pipeline.py sample/sample_notes.md --ask "Who builds the progress bar?" --ask "What is the budget?"
@@ -110,6 +144,7 @@ python pipeline.py my_meeting.mp4 --whisper base --llm qwen3:1.7b
 ### Tests
 ```bash
 python tests/test_pipeline.py
+python tests/test_server.py      # the PC service and the hosted page's client, over real HTTP
 ```
 The tests fake Ollama and Whisper, so they run anywhere without models.
 
