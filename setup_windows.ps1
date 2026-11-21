@@ -7,7 +7,11 @@ if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-py -3 -m venv .venv
+# Prefer the Python launcher (py), but many installs (e.g. from python.org without the
+# launcher, or Anaconda) only have python on PATH.
+if (Get-Command py -ErrorAction SilentlyContinue) { py -3 -m venv .venv }
+elseif (Get-Command python -ErrorAction SilentlyContinue) { python -m venv .venv }
+else { Write-Host "Python 3.10+ is not installed. Install it from https://www.python.org/downloads/ and rerun."; exit 1 }
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 

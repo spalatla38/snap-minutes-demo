@@ -1,4 +1,4 @@
-"""SNAP Minutes pipeline. Everything runs on this computer.
+"""SNAP Assist pipeline. Everything runs on this computer.
 
 meeting video  -> faster-whisper -> numbered transcript --+--> 1. transcript download
 transcript/notes file -> readers ----------------------/   +--> 2. main bullet points (local LLM via Ollama)
@@ -65,7 +65,18 @@ def cuda_available() -> bool:
         return False
 
 
-def _run_whisper(audio, model_size, device, compute_type, language, on_progress):
+def vad_available() -> bool:
+    """Whisper's VAD filter (skips silence; faster and fewer made-up lines on quiet audio)
+    needs onnxruntime. Some onnxruntime builds fail to load on some Windows machines
+    (1.23.2 does on the reference laptop), so check rather than let transcription fail."""
+    try:
+        import onnxruntime  # noqa: F401
+        return True
+    except Exception:  # ImportError, or a DLL that fails to initialize
+        return False
+
+
+def _run_whisper(audio, model_size, device, compute_type, language, on_progress, on_info=None):
     from faster_whisper import WhisperModel
 
     try:
@@ -79,7 +90,10 @@ def _run_whisper(audio, model_size, device, compute_type, language, on_progress)
             "Run the setup script once while online to download it."
         ) from e
     try:
-        seg_iter, info = model.transcribe(audio, beam_size=5, vad_filter=True, language=language)
+        vad = vad_available()
+        seg_iter, info = model.transcribe(audio, beam_size=5, vad_filter=vad, language=language)
+        if on_info:  # the audio length is known now, so the UI can estimate the time left
+            on_info({"duration": info.duration, "device": device})
         segments: list[Segment] = []
         for s in seg_iter:
             text = s.text.strip()
@@ -87,7 +101,7 @@ def _run_whisper(audio, model_size, device, compute_type, language, on_progress)
                 segments.append(Segment(len(segments) + 1, float(s.start), float(s.end), text))
             if on_progress and info.duration:
                 on_progress(min(s.end / info.duration, 1.0))
-        return segments, {"language": info.language, "duration": info.duration}
+        return segments, {"language": info.language, "duration": info.duration, "vad": vad}
     finally:
         del model  # free Whisper before the language model runs
         gc.collect()
@@ -100,11 +114,14 @@ def transcribe(
     compute_type: Optional[str] = None,
     language: Optional[str] = None,
     on_progress: Optional[Callable[[float], None]] = None,
+    on_info: Optional[Callable[[dict], None]] = None,
 ) -> tuple[list[Segment], dict]:
     """Transcribe a video or audio file (a path or in-memory bytes) locally.
 
     device="auto" tries the NVIDIA GPU first and falls back to the CPU if the GPU or its
     CUDA libraries aren't usable, so a driver problem never breaks the demo.
+    on_progress(fraction) follows Whisper's position in the audio; on_info({"duration",
+    "device"}) fires once per attempt, as soon as the audio length is known.
     faster-whisper decodes the audio track itself, so ffmpeg is not required."""
     try:
         import faster_whisper  # noqa: F401
@@ -122,7 +139,7 @@ def transcribe(
         if hasattr(audio, "seek"):
             audio.seek(0)
         try:
-            segments, meta = _run_whisper(audio, model_size, dev, ctype, language, on_progress)
+            segments, meta = _run_whisper(audio, model_size, dev, ctype, language, on_progress, on_info)
         except Exception as e:
             if dev == "cpu":
                 raise
@@ -233,11 +250,15 @@ def num_ctx_for(text: str) -> int:
     return max(4096, min(32_768, 1 << (est_tokens - 1).bit_length()))
 
 
-def chat_json(model: str, system: str, user: str, schema: dict, timeout: int = 600) -> dict:
-    """One local chat call that must return JSON matching `schema`."""
+def chat_json(model: str, system: str, user: str, schema: dict, timeout: int = 600,
+              on_token: Optional[Callable[[int, str], None]] = None) -> dict:
+    """One local chat call that must return JSON matching `schema`.
+
+    With on_token, the reply is streamed and on_token(tokens_so_far, text_so_far) is called
+    as it is written, which is what drives the progress bar. Without it, one plain request."""
     payload = {
         "model": model,
-        "stream": False,
+        "stream": on_token is not None,
         "format": schema,
         "keep_alive": "30m",
         "options": {"temperature": 0, "num_ctx": num_ctx_for(system + user)},
@@ -245,13 +266,42 @@ def chat_json(model: str, system: str, user: str, schema: dict, timeout: int = 6
                      {"role": "user", "content": user}],
         **_thinking_off(model),
     }
-    r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout)
-    r.raise_for_status()
-    content = r.json()["message"]["content"]
+    if on_token is None:
+        r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout)
+        r.raise_for_status()
+        content = r.json()["message"]["content"]
+    else:
+        content, n = "", 0
+        with requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout, stream=True) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                if chunk.get("error"):
+                    raise RuntimeError(f"Ollama error: {chunk['error']}")
+                piece = chunk.get("message", {}).get("content", "")
+                if piece:
+                    content += piece
+                    n += 1  # Ollama streams about one token per chunk
+                    on_token(n, content)
+                if chunk.get("done"):
+                    break
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"The model did not return valid JSON: {content[:200]}") from e
+
+
+def model_loaded(model: str) -> bool:
+    """True if Ollama already has this model in memory (no ~15 s load before the first token)."""
+    try:
+        r = requests.get(f"{OLLAMA_URL}/api/ps", timeout=2)
+        r.raise_for_status()
+        names = {m.get("name", "") for m in r.json().get("models", [])}
+    except (requests.RequestException, ValueError):
+        return False
+    return model in names or f"{model}:latest" in names
 
 
 def warm_up(model: str = DEFAULT_LLM) -> None:
@@ -278,20 +328,81 @@ def _chunks(lines: list[str], max_chars: int) -> list[list[str]]:
     return chunks
 
 
+# Progress-bar helpers. The reply has two long lists and two short text fields. Ollama's
+# structured output writes the keys in alphabetical order (action_items, key_points,
+# summary, title), but nothing below depends on the order.
+LIST_KEYS = ('"action_items"', '"key_points"')
+SHORT_KEYS = ('"summary"', '"title"')
+SHORT_FIELD_TOKENS = 35   # a 1-2 sentence summary or an 8-word title, plus JSON punctuation
+LISTS_CAP = 0.85          # before the lists are known to be finished, never show more than this
+
+
+def expected_note_tokens(prompt_chars: int) -> int:
+    """Rough length of the JSON reply, used only for the progress bar until the reply
+    itself gives a better estimate. Measured with qwen3:4b-instruct on ~2.7k-character
+    sample transcripts: 530 to 860 tokens."""
+    return int(min(1600, max(400, 250 + prompt_chars / 6)))  # ~700 for the samples
+
+
+def _reply_fraction(n: int, text: str, guess: dict) -> float:
+    """How far through the JSON reply the model is, after n tokens of `text`.
+
+    Until both lists are finished, compare with the rough expected length (capped at
+    LISTS_CAP). Once a short field starts after both lists, only that field and any short
+    field not yet seen are left, about SHORT_FIELD_TOKENS each, so the total is known."""
+    if guess.get("total") is None and all(k in text for k in LIST_KEYS):
+        lists_start = max(text.find(k) for k in LIST_KEYS)
+        started_after = [k for k in SHORT_KEYS if text.find(k) > lists_start]
+        if started_after:
+            left = len(started_after) + sum(k not in text for k in SHORT_KEYS)
+            guess["total"] = n + SHORT_FIELD_TOKENS * left
+    if guess.get("total"):
+        return min(n / max(guess["total"], n + 1), 0.97)
+    return min(n / guess["tokens"], LISTS_CAP)
+
+
+def note_calls(segments: list[Segment], max_chars: int = MAX_CHARS_PER_CALL) -> list[int]:
+    """Prompt size (characters) of each model call extract_notes will make, merge included."""
+    parts = _chunks(lines_for_prompt(segments), max_chars)
+    sizes = [len(SYSTEM_PROMPT) + sum(len(x) + 1 for x in p) for p in parts]
+    return sizes if len(sizes) == 1 else sizes + [len(MERGE_PROMPT) + 3_000 * len(sizes)]
+
+
 def extract_notes(segments: list[Segment], model: str = DEFAULT_LLM,
-                  max_chars: int = MAX_CHARS_PER_CALL) -> dict:
+                  max_chars: int = MAX_CHARS_PER_CALL,
+                  on_progress: Optional[Callable[[float, dict], None]] = None) -> dict:
     """Main bullet points. Short transcripts use one call; long ones are summarized
-    part by part and then merged."""
+    part by part and then merged.
+
+    on_progress(fraction, info) is called as tokens arrive. info has "call", "calls" and
+    "tokens"; tokens == 0 means the model is still reading the transcript."""
     if not segments:
         raise ValueError("The transcript is empty.")
     parts = _chunks(lines_for_prompt(segments), max_chars)
     wrap = lambda p: "<transcript>\n" + "\n".join(p) + "\n</transcript>"  # noqa: E731
+    sizes = note_calls(segments, max_chars)
+    n_calls = len(sizes)
+
+    def call(i, system, user):
+        if on_progress is None:
+            return chat_json(model, system, user, NOTES_SCHEMA)
+        guess = {"tokens": expected_note_tokens(sizes[i]), "total": None}
+        on_progress(i / n_calls, {"call": i + 1, "calls": n_calls, "tokens": 0})
+
+        def tick(n, text):
+            f = _reply_fraction(n, text, guess)
+            on_progress((i + f) / n_calls, {"call": i + 1, "calls": n_calls, "tokens": n})
+
+        return chat_json(model, system, user, NOTES_SCHEMA, on_token=tick)
+
     if len(parts) == 1:
-        raw = chat_json(model, SYSTEM_PROMPT, wrap(parts[0]), NOTES_SCHEMA)
+        raw = call(0, SYSTEM_PROMPT, wrap(parts[0]))
     else:
-        partials = [chat_json(model, SYSTEM_PROMPT, wrap(p), NOTES_SCHEMA) for p in parts]
-        raw = chat_json(model, MERGE_PROMPT, json.dumps({"partial_notes": partials}, ensure_ascii=False),
-                        NOTES_SCHEMA)
+        partials = [call(i, SYSTEM_PROMPT, wrap(p)) for i, p in enumerate(parts)]
+        raw = call(len(parts), MERGE_PROMPT,
+                   json.dumps({"partial_notes": partials}, ensure_ascii=False))
+    if on_progress:
+        on_progress(1.0, {"call": n_calls, "calls": n_calls, "tokens": None})
     return validate_notes(raw, segments)
 
 
@@ -383,7 +494,7 @@ def to_markdown(notes: dict, segments: list[Segment]) -> str:
     out += [f"- {kp['point']}{where(kp)}" for kp in notes["key_points"]]
     out += ["", "## Action items", "", "| Owner | Task | Due | Source |", "|---|---|---|---|"]
     out += [f"| {a['owner']} | {a['task']} | {a['due']} |{where(a)} |" for a in notes["action_items"]]
-    out += ["", "_Generated on this device by SNAP Minutes. No data left the machine._"]
+    out += ["", "_Generated on this device by SNAP Assist. No data left the machine._"]
     return "\n".join(out)
 
 
@@ -391,7 +502,7 @@ def to_markdown(notes: dict, segments: list[Segment]) -> str:
 # CLI
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    ap = argparse.ArgumentParser(description="SNAP Minutes: on-device meeting notes")
+    ap = argparse.ArgumentParser(description="SNAP Assist: on-device meeting notes")
     ap.add_argument("input", nargs="?", help="video, audio, transcript or notes file")
     ap.add_argument("--file", help="same as the positional input")
     ap.add_argument("--transcript", help="alias for --file")

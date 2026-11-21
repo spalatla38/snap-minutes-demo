@@ -1,6 +1,12 @@
 # All permissively licensed (MIT / Apache 2.0 / BSD). Everything runs locally.
 streamlit>=1.36
 faster-whisper>=1.0.3
+# CTranslate2 4.9.0 (pip's default) crashes with an access violation when loading any
+# Whisper model on Windows, CPU or GPU. 4.6.0 is verified on the RTX 3060 reference laptop.
+ctranslate2==4.6.0
+# onnxruntime runs Whisper's VAD (silence) filter. 1.23.2 (pip's default) fails to load on the
+# Windows reference laptop ("DLL initialization routine failed"); 1.20.1 works.
+onnxruntime==1.20.1; sys_platform == "win32"
 requests>=2.31
 psutil>=5.9
 numpy>=1.26
